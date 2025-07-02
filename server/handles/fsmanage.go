@@ -35,6 +35,10 @@ func FsMkdir(c *gin.Context) {
 		common.ErrorResp(c, err, 403)
 		return
 	}
+	if !common.RequireRolePermission(user, "mkdir", reqPath) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
 	if !user.CanWrite() {
 		meta, err := op.GetNearestMeta(stdpath.Dir(reqPath))
 		if err != nil {
@@ -82,6 +86,10 @@ func FsMove(c *gin.Context) {
 		common.ErrorResp(c, err, 403)
 		return
 	}
+	if !common.RequireRolePermission(user, "move", srcDir) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
 	dstDir, err := user.JoinPath(req.DstDir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
@@ -116,13 +124,17 @@ func FsCopy(c *gin.Context) {
 		return
 	}
 	user := c.MustGet("user").(*model.User)
-	if !user.CanCopy() {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
 	srcDir, err := user.JoinPath(req.SrcDir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.RequireRolePermission(user, "copy", srcDir) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	if !user.CanCopy() {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 	dstDir, err := user.JoinPath(req.DstDir)
@@ -167,13 +179,17 @@ func FsRename(c *gin.Context) {
 		return
 	}
 	user := c.MustGet("user").(*model.User)
-	if !user.CanRename() {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.RequireRolePermission(user, "rename", reqPath) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	if !user.CanRename() {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 	if !req.Overwrite {
@@ -208,13 +224,17 @@ func FsRemove(c *gin.Context) {
 		return
 	}
 	user := c.MustGet("user").(*model.User)
-	if !user.CanRemove() {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
 	reqDir, err := user.JoinPath(req.Dir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.RequireRolePermission(user, "remove", reqDir) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	if !user.CanRemove() {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 	for _, name := range req.Names {
@@ -240,13 +260,17 @@ func FsRemoveEmptyDirectory(c *gin.Context) {
 	}
 
 	user := c.MustGet("user").(*model.User)
-	if !user.CanRemove() {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
 	srcDir, err := user.JoinPath(req.SrcDir)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
+		return
+	}
+	if !common.RequireRolePermission(user, "remove_empty_directory", srcDir) {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
+		return
+	}
+	if !user.CanRemove() {
+		common.ErrorResp(c, errs.PermissionDenied, 403)
 		return
 	}
 
