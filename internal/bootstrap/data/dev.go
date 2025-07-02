@@ -22,13 +22,15 @@ func initDevData() {
 	if err != nil {
 		log.Fatalf("failed to create storage: %+v", err)
 	}
-	err = db.CreateUser(&model.User{
+	u := &model.User{
 		Username:   "Noah",
 		Password:   "hsu",
 		BasePath:   "/data",
-		Role:       0,
+		RoleInfo:   []int{0},
 		Permission: 512,
-	})
+	}
+	_ = u.SaveRoles()
+	err = db.CreateUser(u)
 	if err != nil {
 		log.Fatalf("failed to create user: %+v", err)
 	}

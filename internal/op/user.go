@@ -22,6 +22,7 @@ func GetAdmin() (*model.User, error) {
 		if err != nil {
 			return nil, err
 		}
+		user.LoadRoles()
 		adminUser = user
 	}
 	return adminUser, nil
@@ -33,6 +34,7 @@ func GetGuest() (*model.User, error) {
 		if err != nil {
 			return nil, err
 		}
+		user.LoadRoles()
 		guestUser = user
 	}
 	return guestUser, nil
@@ -54,6 +56,7 @@ func GetUserByName(username string) (*model.User, error) {
 		if err != nil {
 			return nil, err
 		}
+		_user.LoadRoles()
 		userCache.Set(username, _user, cache.WithEx[*model.User](time.Hour))
 		return _user, nil
 	})
@@ -61,11 +64,17 @@ func GetUserByName(username string) (*model.User, error) {
 }
 
 func GetUserById(id uint) (*model.User, error) {
-	return db.GetUserById(id)
+	user, err := db.GetUserById(id)
+	if err != nil {
+		return nil, err
+	}
+	user.LoadRoles()
+	return user, nil
 }
 
 func GetUsers(pageIndex, pageSize int) (users []model.User, count int64, err error) {
-	return db.GetUsers(pageIndex, pageSize)
+	users, count, err = db.GetUsers(pageIndex, pageSize)
+	return users, count, err
 }
 
 func CreateUser(u *model.User) error {
@@ -90,6 +99,7 @@ func UpdateUser(u *model.User) error {
 	if err != nil {
 		return err
 	}
+	old.LoadRoles()
 	if u.IsAdmin() {
 		adminUser = nil
 	}

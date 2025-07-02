@@ -42,7 +42,9 @@ func getTaskInfo[T task.TaskExtensionInfo](task T) TaskInfo {
 	creatorRole := -1
 	if task.GetCreator() != nil {
 		creatorName = task.GetCreator().Username
-		creatorRole = task.GetCreator().Role
+		if len(task.GetCreator().RoleInfo) > 0 {
+			creatorRole = task.GetCreator().RoleInfo[0]
+		}
 	}
 	return TaskInfo{
 		ID:          task.GetID(),

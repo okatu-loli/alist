@@ -7,14 +7,21 @@ import (
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pkg/errors"
+	"gorm.io/gorm"
 )
 
 func GetUserByRole(role int) (*model.User, error) {
-	user := model.User{Role: role}
-	if err := db.Where(user).Take(&user).Error; err != nil {
+	var users []model.User
+	if err := db.Find(&users).Error; err != nil {
 		return nil, err
 	}
-	return &user, nil
+	for i := range users {
+		users[i].LoadRoles()
+		if users[i].RoleInfo.Contains(role) {
+			return &users[i], nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
 }
 
 func GetUserByName(username string) (*model.User, error) {
@@ -22,6 +29,7 @@ func GetUserByName(username string) (*model.User, error) {
 	if err := db.Where(user).First(&user).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed find user")
 	}
+	user.LoadRoles()
 	return &user, nil
 }
 
@@ -30,6 +38,7 @@ func GetUserBySSOID(ssoID string) (*model.User, error) {
 	if err := db.Where(user).First(&user).Error; err != nil {
 		return nil, errors.Wrapf(err, "The single sign on platform is not bound to any users")
 	}
+	user.LoadRoles()
 	return &user, nil
 }
 
@@ -38,14 +47,21 @@ func GetUserById(id uint) (*model.User, error) {
 	if err := db.First(&u, id).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed get old user")
 	}
+	u.LoadRoles()
 	return &u, nil
 }
 
 func CreateUser(u *model.User) error {
+	if err := u.SaveRoles(); err != nil {
+		return err
+	}
 	return errors.WithStack(db.Create(u).Error)
 }
 
 func UpdateUser(u *model.User) error {
+	if err := u.SaveRoles(); err != nil {
+		return err
+	}
 	return errors.WithStack(db.Save(u).Error)
 }
 
@@ -56,6 +72,9 @@ func GetUsers(pageIndex, pageSize int) (users []model.User, count int64, err err
 	}
 	if err := userDB.Order(columnName("id")).Offset((pageIndex - 1) * pageSize).Limit(pageSize).Find(&users).Error; err != nil {
 		return nil, 0, errors.Wrapf(err, "failed get find users")
+	}
+	for i := range users {
+		users[i].LoadRoles()
 	}
 	return users, count, nil
 }

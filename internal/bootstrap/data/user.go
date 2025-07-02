@@ -29,12 +29,13 @@ func initUser() {
 				Username: "admin",
 				Salt:     salt,
 				PwdHash:  model.TwoHashPwd(adminPassword, salt),
-				Role:     model.ADMIN,
+				RoleInfo: []int{model.ADMIN},
 				BasePath: "/",
 				Authn:    "[]",
 				// 0(can see hidden) - 7(can remove) & 12(can read archives) - 13(can decompress archives)
 				Permission: 0x30FF,
 			}
+			_ = admin.SaveRoles()
 			if err := op.CreateUser(admin); err != nil {
 				panic(err)
 			} else {
@@ -52,12 +53,13 @@ func initUser() {
 				Username:   "guest",
 				PwdHash:    model.TwoHashPwd("guest", salt),
 				Salt:       salt,
-				Role:       model.GUEST,
+				RoleInfo:   []int{model.GUEST},
 				BasePath:   "/",
 				Permission: 0,
 				Disabled:   true,
 				Authn:      "[]",
 			}
+			_ = guest.SaveRoles()
 			if err := db.CreateUser(guest); err != nil {
 				utils.Log.Fatalf("[init user] Failed to create guest user: %v", err)
 			}

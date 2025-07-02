@@ -11,6 +11,7 @@ import (
 	"github.com/alist-org/alist/v3/pkg/utils/random"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pkg/errors"
+	"gorm.io/datatypes"
 )
 
 const (
@@ -21,16 +22,28 @@ const (
 
 const StaticHashSalt = "https://github.com/alist-org/alist"
 
+type RoleIdSlice []int
+
+func (r RoleIdSlice) Contains(id int) bool {
+	for _, v := range r {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
 type User struct {
-	ID       uint   `json:"id" gorm:"primaryKey"`                      // unique key
-	Username string `json:"username" gorm:"unique" binding:"required"` // username
-	PwdHash  string `json:"-"`                                         // password hash
-	PwdTS    int64  `json:"-"`                                         // password timestamp
-	Salt     string `json:"-"`                                         // unique salt
-	Password string `json:"password"`                                  // password
-	BasePath string `json:"base_path"`                                 // base path
-	Role     int    `json:"role"`                                      // user's role
-	Disabled bool   `json:"disabled"`
+	ID       uint           `json:"id" gorm:"primaryKey"`                      // unique key
+	Username string         `json:"username" gorm:"unique" binding:"required"` // username
+	PwdHash  string         `json:"-"`                                         // password hash
+	PwdTS    int64          `json:"-"`                                         // password timestamp
+	Salt     string         `json:"-"`                                         // unique salt
+	Password string         `json:"password"`                                  // password
+	BasePath string         `json:"base_path"`                                 // base path
+	Role     datatypes.JSON `json:"role"`                                      // user's roles json array
+	RoleInfo RoleIdSlice    `json:"role_info" gorm:"-"`
+	Disabled bool           `json:"disabled"`
 	// Determine permissions by bit
 	//   0:  can see hidden files
 	//   1:  can access without password
@@ -52,12 +65,28 @@ type User struct {
 	Authn      string `gorm:"type:text" json:"-"`
 }
 
+func (u *User) LoadRoles() {
+	if len(u.Role) == 0 {
+		return
+	}
+	_ = json.Unmarshal(u.Role, &u.RoleInfo)
+}
+
+func (u *User) SaveRoles() error {
+	bs, err := json.Marshal(u.RoleInfo)
+	if err != nil {
+		return err
+	}
+	u.Role = bs
+	return nil
+}
+
 func (u *User) IsGuest() bool {
-	return u.Role == GUEST
+	return u.RoleInfo.Contains(GUEST)
 }
 
 func (u *User) IsAdmin() bool {
-	return u.Role == ADMIN
+	return u.RoleInfo.Contains(ADMIN)
 }
 
 func (u *User) ValidateRawPassword(password string) error {

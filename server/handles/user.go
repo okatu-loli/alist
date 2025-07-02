@@ -5,6 +5,7 @@ import (
 
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
+	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -35,6 +36,7 @@ func CreateUser(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
+	_ = utils.Json.Unmarshal(req.Role, &req.RoleInfo)
 	if req.IsAdmin() || req.IsGuest() {
 		common.ErrorStrResp(c, "admin or guest user can not be created", 400, true)
 		return
@@ -55,15 +57,13 @@ func UpdateUser(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
+	_ = utils.Json.Unmarshal(req.Role, &req.RoleInfo)
 	user, err := op.GetUserById(req.ID)
 	if err != nil {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	if user.Role != req.Role {
-		common.ErrorStrResp(c, "role can not be changed", 400)
-		return
-	}
+	user.LoadRoles()
 	if req.Password == "" {
 		req.PwdHash = user.PwdHash
 		req.Salt = user.Salt
@@ -74,9 +74,22 @@ func UpdateUser(c *gin.Context) {
 	if req.OtpSecret == "" {
 		req.OtpSecret = user.OtpSecret
 	}
-	if req.Disabled && req.IsAdmin() {
+	if req.Disabled && req.RoleInfo.Contains(model.ADMIN) {
 		common.ErrorStrResp(c, "admin user can not be disabled", 400)
 		return
+	}
+	// ensure unique admin and guest
+	if !user.RoleInfo.Contains(model.ADMIN) && req.RoleInfo.Contains(model.ADMIN) {
+		if admin, err := op.GetAdmin(); err == nil && admin.ID != req.ID {
+			common.ErrorStrResp(c, "admin user already exists", 400)
+			return
+		}
+	}
+	if !user.RoleInfo.Contains(model.GUEST) && req.RoleInfo.Contains(model.GUEST) {
+		if guest, err := op.GetGuest(); err == nil && guest.ID != req.ID {
+			common.ErrorStrResp(c, "guest user already exists", 400)
+			return
+		}
 	}
 	if err := op.UpdateUser(&req); err != nil {
 		common.ErrorResp(c, err, 500)
