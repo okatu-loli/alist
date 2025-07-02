@@ -91,6 +91,20 @@ func Init(e *gin.Engine) {
 	public.Any("/archive_extensions", handles.ArchiveExtensions)
 
 	_fs(auth.Group("/fs"))
+	role := auth.Group("/role", middlewares.AuthAdmin)
+	role.GET("", handles.ListRoles)
+	role.POST("", handles.CreateRole)
+	role.PUT("", handles.UpdateRole)
+	role.DELETE("", handles.DeleteRole)
+
+	perm := auth.Group("/permission", middlewares.AuthAdmin)
+	perm.GET("", handles.ListPermissions)
+	perm.GET("/:id", handles.GetPermission)
+	perm.POST("", handles.CreatePermission)
+	perm.PUT("", handles.UpdatePermission)
+	perm.DELETE("", handles.DeletePermission)
+
+	auth.PUT("/user/:id/roles", middlewares.AuthAdmin, handles.UpdateUserRoles)
 	_task(auth.Group("/task", middlewares.AuthNotGuest))
 	admin(auth.Group("/admin", middlewares.AuthAdmin))
 	if flags.Debug || flags.Dev {

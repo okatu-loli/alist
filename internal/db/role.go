@@ -10,6 +10,7 @@ func GetRoleById(id uint) (*model.Role, error) {
 	if err := db.First(&r, id).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed get old role")
 	}
+	r.LoadPermissions()
 	return &r, nil
 }
 
@@ -18,14 +19,21 @@ func GetRoleByName(name string) (*model.Role, error) {
 	if err := db.Where(r).First(&r).Error; err != nil {
 		return nil, errors.Wrapf(err, "failed find role")
 	}
+	r.LoadPermissions()
 	return &r, nil
 }
 
 func CreateRole(r *model.Role) error {
+	if err := r.SavePermissions(); err != nil {
+		return err
+	}
 	return errors.WithStack(db.Create(r).Error)
 }
 
 func UpdateRole(r *model.Role) error {
+	if err := r.SavePermissions(); err != nil {
+		return err
+	}
 	return errors.WithStack(db.Save(r).Error)
 }
 
@@ -36,6 +44,9 @@ func GetRoles(pageIndex, pageSize int) (roles []model.Role, count int64, err err
 	}
 	if err = roleDB.Order(columnName("id")).Offset((pageIndex - 1) * pageSize).Limit(pageSize).Find(&roles).Error; err != nil {
 		return nil, 0, errors.Wrapf(err, "failed get find roles")
+	}
+	for i := range roles {
+		roles[i].LoadPermissions()
 	}
 	return roles, count, nil
 }

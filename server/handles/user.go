@@ -150,3 +150,31 @@ func DelUserCache(c *gin.Context) {
 	}
 	common.SuccessResp(c)
 }
+
+// UpdateUserRoles updates the roles for a user.
+func UpdateUserRoles(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		common.ErrorResp(c, err, 400)
+		return
+	}
+	var req struct {
+		Roles model.RoleIdSlice `json:"roles"`
+	}
+	if err := c.ShouldBind(&req); err != nil {
+		common.ErrorResp(c, err, 400)
+		return
+	}
+	user, err := op.GetUserById(uint(id))
+	if err != nil {
+		common.ErrorResp(c, err, 500, true)
+		return
+	}
+	user.RoleInfo = req.Roles
+	if err := op.UpdateUser(user); err != nil {
+		common.ErrorResp(c, err, 500, true)
+		return
+	}
+	common.SuccessResp(c)
+}
