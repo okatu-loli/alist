@@ -105,6 +105,16 @@ English | [中文](./README_cn.md) | [日本語](./README_ja.md) | [Contributing
 
 <https://al.nn.ci>
 
+## Initial permissions
+
+The first startup creates `admin` and `guest` users automatically.
+Their permissions can be customized with two environment variables before running AList:
+
+- `ALIST_ADMIN_PERMISSION` sets the initial permission bits for the admin user. Default: `0x30FF`.
+- `ALIST_GUEST_PERMISSION` sets the initial permission bits for the guest user. Default: `0`.
+
+Set these variables prior to the initial run if you need different defaults.
+
 ## Discussion
 
 Please go to our [discussion forum](https://github.com/alist-org/alist/discussions) for general questions, **issues are for bug reports and feature requests only.**

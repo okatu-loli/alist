@@ -2,6 +2,7 @@ package data
 
 import (
 	"os"
+	"strconv"
 
 	"github.com/alist-org/alist/v3/cmd/flags"
 	"github.com/alist-org/alist/v3/internal/db"
@@ -14,9 +15,15 @@ import (
 )
 
 func initUser() {
+	adminRole, _ := op.GetRoleByName("Admin")
 	admin, err := op.GetAdmin()
 	adminPassword := random.String(8)
 	envpass := os.Getenv("ALIST_ADMIN_PASSWORD")
+	adminPermEnv := os.Getenv("ALIST_ADMIN_PERMISSION")
+	adminPermission := int32(0x30FF)
+	if p, err := strconv.ParseInt(adminPermEnv, 0, 32); err == nil {
+		adminPermission = int32(p)
+	}
 	if flags.Dev {
 		adminPassword = "admin"
 	} else if len(envpass) > 0 {
@@ -29,11 +36,11 @@ func initUser() {
 				Username: "admin",
 				Salt:     salt,
 				PwdHash:  model.TwoHashPwd(adminPassword, salt),
-				RoleInfo: []int{model.ADMIN},
+				RoleInfo: []int{int(adminRole.ID)},
 				BasePath: "/",
 				Authn:    "[]",
 				// 0(can see hidden) - 7(can remove) & 12(can read archives) - 13(can decompress archives)
-				Permission: 0x30FF,
+				Permission: adminPermission,
 			}
 			_ = admin.SaveRoles()
 			if err := op.CreateUser(admin); err != nil {
@@ -45,6 +52,12 @@ func initUser() {
 			utils.Log.Fatalf("[init user] Failed to get admin user: %v", err)
 		}
 	}
+	guestRole, _ := op.GetRoleByName("Guest")
+	guestPermEnv := os.Getenv("ALIST_GUEST_PERMISSION")
+	guestPermission := int32(0)
+	if p, err := strconv.ParseInt(guestPermEnv, 0, 32); err == nil {
+		guestPermission = int32(p)
+	}
 	guest, err := op.GetGuest()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -53,9 +66,9 @@ func initUser() {
 				Username:   "guest",
 				PwdHash:    model.TwoHashPwd("guest", salt),
 				Salt:       salt,
-				RoleInfo:   []int{model.GUEST},
+				RoleInfo:   []int{int(guestRole.ID)},
 				BasePath:   "/",
-				Permission: 0,
+				Permission: guestPermission,
 				Disabled:   true,
 				Authn:      "[]",
 			}

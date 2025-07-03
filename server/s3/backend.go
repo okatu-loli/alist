@@ -83,9 +83,9 @@ func (b *s3Backend) ListBucket(ctx context.Context, bucketName string, prefix *g
 	}
 
 	response := gofakes3.NewObjectList()
-	path, remaining := prefixParser(prefix)
+	path1, remaining := prefixParser(prefix)
 
-	err = b.entryListR(bucketPath, path, remaining, prefix.HasDelimiter, response)
+	err = b.entryListR(bucketPath, path1, remaining, prefix.HasDelimiter, response)
 	if err == gofakes3.ErrNoSuchKey {
 		// AWS just returns an empty list
 		response = gofakes3.NewObjectList()
@@ -302,18 +302,18 @@ func (b *s3Backend) PutObject(
 		Modified: ti,
 		Ctime:    time.Now(),
 	}
-	stream := &stream.FileStream{
+	stream1 := &stream.FileStream{
 		Obj:      &obj,
 		Reader:   input,
 		Mimetype: meta["Content-Type"],
 	}
 
-	err = fs.PutDirectly(ctx, reqPath, stream)
+	err = fs.PutDirectly(ctx, reqPath, stream1)
 	if err != nil {
 		return result, err
 	}
 
-	if err := stream.Close(); err != nil {
+	if err := stream1.Close(); err != nil {
 		// remove file when close error occurred (FsPutErr)
 		_ = fs.Remove(ctx, fp)
 		return result, err
