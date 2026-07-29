@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/model"
 )
 
 func GetApiUrl(r *http.Request) string {
@@ -27,4 +28,16 @@ func GetApiUrl(r *http.Request) string {
 	}
 	api = strings.TrimSuffix(api, "/")
 	return api
+}
+
+// CompleteLink makes a driver-relative URL absolute against the request's API
+// base before it is handed to a client. Drivers may return URLs like "/p/...";
+// only the HTTP layer knows the base, so completion lives here, not in fs.
+func CompleteLink(r *http.Request, l *model.Link) {
+	if l == nil || l.URL == "" {
+		return
+	}
+	if !strings.HasPrefix(l.URL, "http://") && !strings.HasPrefix(l.URL, "https://") {
+		l.URL = GetApiUrl(r) + l.URL
+	}
 }

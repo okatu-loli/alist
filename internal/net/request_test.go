@@ -70,7 +70,10 @@ func TestDownloadOrder(t *testing.T) {
 		t.Errorf("expect %v API calls, got %v", e, a)
 	}
 
-	expectRngs := []string{"2-3", "5-3", "8-3", "11-1"}
+	// chunk layout is smallest-part-first (request.go: the leading chunk takes
+	// length%partSize so video playback gets its header sooner): 10%3=1, then
+	// the remaining chunks align to partSize
+	expectRngs := []string{"2-1", "3-3", "6-3", "9-3"}
 	for _, rng := range expectRngs {
 		if !slices.Contains(*ranges, rng) {
 			t.Errorf("expect range %v, but absent in return", rng)

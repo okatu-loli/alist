@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// AuthNMethodService mirrors ext.AuthNMethod (design §2.2): a Kind=AuthNMethod
+// plugin authenticates an AList user (SSO/OIDC, LDAP, TOTP, WebAuthn). The
+// plugin only PROVES identity over this service; the host alone decides whether
+// to mint a session token. Nothing on this service issues or signs a token.
+service AuthNMethodService {
+  // GetManifest is the handshake: the manifest the host registers the method
+  // from. driver_config_json is unused by AuthNMethod (empty).
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // MethodInfo reports how the host classifies and presents the method.
+  rpc MethodInfo(Empty) returns (MethodInfoReply);
+
+  // Begin starts a challenge (OIDC redirect URL, WebAuthn options, TOTP setup).
+  rpc Begin(BeginRequest) returns (BeginReply);
+  // Finish verifies the client's response and returns the asserted identity.
+  rpc Finish(FinishRequest) returns (FinishReply);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id it
+  // passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+// AuthKind mirrors ext.AuthKind. The numbering is pinned by the SDK enum
+// (primary=0, second_factor=1, federated=2) and carried verbatim.
+message MethodInfoReply {
+  string id = 1;
+  uint32 kind = 2;
+  map<string, string> display = 3;
+}
+
+message BeginRequest {
+  // principal is the opaque host-issued handle for step-up (empty for a fresh
+  // primary/federated login).
+  string principal = 1;
+  string redirect_uri = 2;
+  string state = 3;
+  map<string, string> params = 4;
+}
+
+message BeginReply {
+  string challenge_id = 1;
+  string redirect_url = 2;
+  bytes data = 3;
+  ErrorProto error = 4;
+}
+
+message FinishRequest {
+  string challenge_id = 1;
+  map<string, string> params = 2;
+  bytes data = 3;
+}
+
+// AuthNResultProto mirrors ext.AuthNResult: the identity ASSERTION, not an
+// authorization. The host gates on it (existing/disabled user, admin cap,
+// federated auto-provision policy) before minting anything.
+message AuthNResultProto {
+  string username = 1;
+  bool verified = 2;
+  ProvisionHintProto auto_provision = 3;
+}
+
+message ProvisionHintProto {
+  string display_name = 1;
+  string email = 2;
+  map<string, string> attributes = 3;
+}
+
+message FinishReply {
+  AuthNResultProto result = 1;
+  ErrorProto error = 2;
+}

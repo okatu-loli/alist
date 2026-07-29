@@ -1,0 +1,14 @@
+{
+  "field.client_id.label": "Client ID",
+  "field.client_id.help": "123 开放平台应用的 Client ID",
+  "field.client_secret.label": "Client Secret",
+  "field.client_secret.help": "123 开放平台应用的 Client Secret(密钥)",
+  "field.private_key.label": "直链鉴权私钥",
+  "field.private_key.help": "启用直链鉴权时填,用于给下载链接签名 auth_key;不用直链鉴权可留空",
+  "field.uid.label": "云盘 UID",
+  "field.uid.help": "123 云盘账号 UID(网页端设置页可见),配合私钥签名直链",
+  "field.valid_duration.label": "直链有效期(分钟)",
+  "field.valid_duration.help": "签名直链的有效时长,默认 30",
+  "field.root_folder_id.label": "根目录 ID",
+  "field.root_folder_id.help": "作为该存储根目录的文件夹 ID,默认 0 即网盘根目录"
+}

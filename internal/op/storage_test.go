@@ -6,6 +6,7 @@ import (
 
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/db"
+	"github.com/alist-org/alist/v3/internal/db/migration"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/pkg/utils"
@@ -21,6 +22,9 @@ func init() {
 	}
 	conf.Conf = conf.DefaultConfig()
 	db.Init(dB)
+	if err := migration.New(dB, "").Up(); err != nil {
+		panic("failed to migrate test database: " + err.Error())
+	}
 }
 
 func TestCreateStorage(t *testing.T) {

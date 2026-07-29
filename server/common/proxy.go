@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"fmt"
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/net"
-	"github.com/alist-org/alist/v3/internal/sign"
 	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/alist-org/alist/v3/pkg/http_range"
 	"github.com/alist-org/alist/v3/pkg/utils"
@@ -48,7 +48,7 @@ func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.
 		attachHeader(w, file)
 		size := file.GetSize()
 		rangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
-			requestHeader := ctx.Value("request_header")
+			requestHeader := ctx.Value(ctxkey.RequestHeader)
 			if requestHeader == nil {
 				requestHeader = http.Header{}
 			}
@@ -136,7 +136,7 @@ func ProxyRange(link *model.Link, size int64) {
 func BuildDownProxyURL(downProxyURL, path string, useSign bool) string {
 	base := strings.Split(downProxyURL, "\n")[0]
 	if useSign {
-		return fmt.Sprintf("%s%s?sign=%s", base, utils.EncodePath(path, true), sign.Sign(path))
+		return fmt.Sprintf("%s%s?sign=%s", base, utils.EncodePath(path, true), SignPath(path))
 	}
 	return fmt.Sprintf("%s%s", base, utils.EncodePath(path, true))
 }

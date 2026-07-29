@@ -4,6 +4,7 @@ import (
 	"context"
 	stdpath "path"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/Xhofe/go-cache"
@@ -23,10 +24,23 @@ import (
 var listCache = cache.NewMemCache(cache.WithShards[[]model.Obj](64))
 var listG singleflight.Group[[]model.Obj]
 
+// listCacheMu serializes read-modify-write cycles on listCache entries.
+// Cached slices are treated as immutable snapshots: every mutation works on a
+// clone and swaps it in via Set, so readers holding a previously returned
+// slice never observe concurrent modification.
+var listCacheMu sync.Mutex
+
+func cacheSet(storage driver.Driver, key string, objs []model.Obj) {
+	listCache.Set(key, objs, cache.WithEx[[]model.Obj](time.Minute*time.Duration(storage.GetStorage().CacheExpiration)))
+}
+
 func updateCacheObj(storage driver.Driver, path string, oldObj model.Obj, newObj model.Obj) {
 	key := Key(storage, path)
+	listCacheMu.Lock()
+	defer listCacheMu.Unlock()
 	objs, ok := listCache.Get(key)
 	if ok {
+		objs = slices.Clone(objs)
 		for i, obj := range objs {
 			if obj.GetName() == newObj.GetName() {
 				objs = slices.Delete(objs, i, i+1)
@@ -39,21 +53,24 @@ func updateCacheObj(storage driver.Driver, path string, oldObj model.Obj, newObj
 				break
 			}
 		}
-		listCache.Set(key, objs, cache.WithEx[[]model.Obj](time.Minute*time.Duration(storage.GetStorage().CacheExpiration)))
+		cacheSet(storage, key, objs)
 	}
 }
 
 func delCacheObj(storage driver.Driver, path string, obj model.Obj) {
 	key := Key(storage, path)
+	listCacheMu.Lock()
+	defer listCacheMu.Unlock()
 	objs, ok := listCache.Get(key)
 	if ok {
+		objs = slices.Clone(objs)
 		for i, oldObj := range objs {
 			if oldObj.GetName() == obj.GetName() {
-				objs = append(objs[:i], objs[i+1:]...)
+				objs = slices.Delete(objs, i, i+1)
 				break
 			}
 		}
-		listCache.Set(key, objs, cache.WithEx[[]model.Obj](time.Minute*time.Duration(storage.GetStorage().CacheExpiration)))
+		cacheSet(storage, key, objs)
 	}
 }
 
@@ -61,20 +78,27 @@ var addSortDebounceMap generic_sync.MapOf[string, func(func())]
 
 func addCacheObj(storage driver.Driver, path string, newObj model.Obj) {
 	key := Key(storage, path)
+	listCacheMu.Lock()
+	defer listCacheMu.Unlock()
 	objs, ok := listCache.Get(key)
 	if ok {
+		objs = slices.Clone(objs)
+		replaced := false
 		for i, obj := range objs {
 			if obj.GetName() == newObj.GetName() {
 				objs[i] = newObj
-				return
+				replaced = true
+				break
 			}
 		}
 
-		// Simple separation of files and folders
-		if len(objs) > 0 && objs[len(objs)-1].IsDir() == newObj.IsDir() {
-			objs = append(objs, newObj)
-		} else {
-			objs = append([]model.Obj{newObj}, objs...)
+		if !replaced {
+			// Simple separation of files and folders
+			if len(objs) > 0 && objs[len(objs)-1].IsDir() == newObj.IsDir() {
+				objs = append(objs, newObj)
+			} else {
+				objs = append([]model.Obj{newObj}, objs...)
+			}
 		}
 
 		if storage.Config().LocalSort {
@@ -82,12 +106,20 @@ func addCacheObj(storage driver.Driver, path string, newObj model.Obj) {
 			log.Debug("addCacheObj: wait start sort")
 			debounce(func() {
 				log.Debug("addCacheObj: start sort")
-				model.SortFiles(objs, storage.GetStorage().OrderBy, storage.GetStorage().OrderDirection)
+				// re-fetch under the lock and sort a fresh clone: sorting the
+				// slice captured above would mutate a snapshot readers may hold
+				listCacheMu.Lock()
+				defer listCacheMu.Unlock()
+				if cur, ok := listCache.Get(key); ok {
+					cur = slices.Clone(cur)
+					model.SortFiles(cur, storage.GetStorage().OrderBy, storage.GetStorage().OrderDirection)
+					cacheSet(storage, key, cur)
+				}
 				addSortDebounceMap.Delete(key)
 			})
 		}
 
-		listCache.Set(key, objs, cache.WithEx[[]model.Obj](time.Minute*time.Duration(storage.GetStorage().CacheExpiration)))
+		cacheSet(storage, key, objs)
 	}
 }
 
@@ -118,7 +150,9 @@ func List(ctx context.Context, storage driver.Driver, path string, args model.Li
 	if !args.Refresh {
 		if files, ok := listCache.Get(key); ok {
 			log.Debugf("use cache when list %s", path)
-			return files, nil
+			// clone the slice header: callers append/filter the result and must
+			// not touch the cached snapshot's backing array
+			return slices.Clone(files), nil
 		}
 	}
 	dir, err := GetUnwrap(ctx, storage, path)
@@ -142,11 +176,6 @@ func List(ctx context.Context, storage driver.Driver, path string, args model.Li
 		}
 		// warp obj name
 		model.WrapObjsName(files)
-		// call hooks
-		go func(reqPath string, files []model.Obj) {
-			HandleObjsUpdateHook(reqPath, files)
-		}(utils.GetFullPath(storage.GetStorage().MountPath, path), files)
-
 		// sort objs
 		if storage.Config().LocalSort {
 			model.SortFiles(files, storage.GetStorage().OrderBy, storage.GetStorage().OrderDirection)
@@ -162,9 +191,18 @@ func List(ctx context.Context, storage driver.Driver, path string, args model.Li
 				listCache.Del(key)
 			}
 		}
+		// Observe the FRESH raw listing (never a cache hit): fired with the full
+		// virtual path (key) so the search auto-update hook parents index nodes
+		// consistently with the build walk. This is the raw driver listing —
+		// op.List does no per-user filtering — so the admin-built index stays
+		// complete regardless of who is browsing. Hooks fast-bail cheaply when
+		// auto-update is off (the common case), so the hot-path cost is one
+		// range over a tiny hook slice plus a nil-check inside the listener.
+		HandleObjsUpdateHook(key, files)
 		return files, nil
 	})
-	return objs, err
+	// same reason as the cache-hit path: never hand out the cached backing array
+	return slices.Clone(objs), err
 }
 
 // Get object from list of files
@@ -259,6 +297,12 @@ func Link(ctx context.Context, storage driver.Driver, path string, args model.Li
 		return nil, nil, errors.WithStack(errs.NotFile)
 	}
 	key := Key(storage, path)
+	ipKey := key + ":" + args.IP
+	// IP-scoped links (link.IPCacheKey) are cached under key+IP, others under
+	// the bare key — probe both, in that order
+	if link, ok := linkCache.Get(ipKey); ok {
+		return link, file, nil
+	}
 	if link, ok := linkCache.Get(key); ok {
 		return link, file, nil
 	}
@@ -268,10 +312,11 @@ func Link(ctx context.Context, storage driver.Driver, path string, args model.Li
 			return nil, errors.Wrapf(err, "failed get link")
 		}
 		if link.Expiration != nil {
+			cacheKey := key
 			if link.IPCacheKey {
-				key = key + ":" + args.IP
+				cacheKey = ipKey
 			}
-			linkCache.Set(key, link, cache.WithEx[*model.Link](*link.Expiration))
+			linkCache.Set(cacheKey, link, cache.WithEx[*model.Link](*link.Expiration))
 		}
 		return link, nil
 	}
@@ -281,7 +326,9 @@ func Link(ctx context.Context, storage driver.Driver, path string, args model.Li
 		return link, file, err
 	}
 
-	link, err, _ := linkG.Do(key, fn)
+	// the flight key must include the IP: for IP-scoped links two clients must
+	// not share one in-flight result
+	link, err, _ := linkG.Do(ipKey, fn)
 	return link, file, err
 }
 
@@ -382,19 +429,35 @@ func Move(ctx context.Context, storage driver.Driver, srcPath, dstDirPath string
 		newObj, err = s.Move(ctx, srcObj, dstDir)
 		if err == nil {
 			delCacheObj(storage, srcDirPath, srcRawObj)
+			if srcRawObj.IsDir() {
+				// drop the whole cached subtree under the old path, or reads of
+				// the moved directory's children keep serving stale entries
+				ClearCache(storage, srcPath)
+			}
+			// the driver may rename the object as part of the move; the relocate
+			// event must reflect its real new name, not the pre-move one
+			newName := srcRawObj.GetName()
 			if newObj != nil {
 				addCacheObj(storage, dstDirPath, model.WrapObjName(newObj))
+				newName = newObj.GetName()
 			} else if !utils.IsBool(lazyCache...) {
 				ClearCache(storage, dstDirPath)
 			}
+			fireObjRelocate(storage, RelocateMove, srcPath,
+				stdpath.Join(dstDirPath, newName), srcRawObj.IsDir())
 		}
 	case driver.Move:
 		err = s.Move(ctx, srcObj, dstDir)
 		if err == nil {
 			delCacheObj(storage, srcDirPath, srcRawObj)
+			if srcRawObj.IsDir() {
+				ClearCache(storage, srcPath)
+			}
 			if !utils.IsBool(lazyCache...) {
 				ClearCache(storage, dstDirPath)
 			}
+			fireObjRelocate(storage, RelocateMove, srcPath,
+				stdpath.Join(dstDirPath, srcRawObj.GetName()), srcRawObj.IsDir())
 		}
 	default:
 		return errs.NotImplement
@@ -419,16 +482,33 @@ func Rename(ctx context.Context, storage driver.Driver, srcPath, dstName string,
 		var newObj model.Obj
 		newObj, err = s.Rename(ctx, srcObj, dstName)
 		if err == nil {
+			if srcRawObj.IsDir() {
+				// cached listings under the old directory name are now orphaned
+				ClearCache(storage, srcPath)
+			}
+			// the driver may pick a different final name than requested; the
+			// relocate event must reflect its real new name, not dstName
+			newName := dstName
 			if newObj != nil {
 				updateCacheObj(storage, srcDirPath, srcRawObj, model.WrapObjName(newObj))
+				newName = newObj.GetName()
 			} else if !utils.IsBool(lazyCache...) {
 				ClearCache(storage, srcDirPath)
 			}
+			fireObjRelocate(storage, RelocateRename, srcPath,
+				stdpath.Join(stdpath.Dir(srcPath), newName), srcRawObj.IsDir())
 		}
 	case driver.Rename:
 		err = s.Rename(ctx, srcObj, dstName)
-		if err == nil && !utils.IsBool(lazyCache...) {
-			ClearCache(storage, srcDirPath)
+		if err == nil {
+			if srcRawObj.IsDir() {
+				ClearCache(storage, srcPath)
+			}
+			if !utils.IsBool(lazyCache...) {
+				ClearCache(storage, srcDirPath)
+			}
+			fireObjRelocate(storage, RelocateRename, srcPath,
+				stdpath.Join(stdpath.Dir(srcPath), dstName), srcRawObj.IsDir())
 		}
 	default:
 		return errs.NotImplement
@@ -502,6 +582,7 @@ func Remove(ctx context.Context, storage driver.Driver, path string) error {
 			if rawObj.IsDir() {
 				ClearCache(storage, path)
 			}
+			fireObjRelocate(storage, RelocateRemove, path, "", rawObj.IsDir())
 		}
 	default:
 		return errs.NotImplement
@@ -599,6 +680,58 @@ func Put(ctx context.Context, storage driver.Driver, dstDirPath string, file mod
 		}
 	}
 	return errors.WithStack(err)
+}
+
+// PutRapid attempts a hash-based rapid-upload ("秒传") of a file named name (of
+// the given size) into dstDirPath on storage, WITHOUT transferring any bytes —
+// the fast path the remote-agent copy executor tries before download+stream.
+// It mirrors op.Put's shape: type-assert the OPTIONAL driver.PutRapid interface
+// (absent -> errs.NotImplement, exactly like op.Put's default branch, so the
+// caller falls back to streaming), ensure the destination directory exists
+// (MakeDir on its parent), resolve the dstDir obj, delegate to the driver, and
+// on a HIT invalidate/refresh the destination-dir cache identically to op.Put.
+//
+//	(true,  nil)  — hit: the file was registered by hash; no bytes moved.
+//	(false, nil)  — no match: the caller must stream the bytes.
+//	(false, err)  — errs.NotImplement (driver has no PutRapid), errs.NotSupport
+//	                (hashes unusable), or any provider error. The rapid-core
+//	                treats ALL of these as "fall back to streaming", never as a
+//	                task failure.
+//
+// The hashes passed in must be ONLY those the source object already exposes;
+// PutRapid never reads/spools bytes to compute a hash (that would defeat the
+// point) — see driver.PutRapid's doc.
+func PutRapid(ctx context.Context, storage driver.Driver, dstDirPath, name string, size int64, hashes utils.HashInfo, lazyCache ...bool) (bool, error) {
+	rapidDriver, ok := storage.(driver.PutRapid)
+	if !ok {
+		return false, errs.NotImplement
+	}
+	if storage.Config().CheckStatus && storage.GetStorage().Status != WORK {
+		return false, errors.Errorf("storage not init: %s", storage.GetStorage().Status)
+	}
+	dstDirPath = utils.FixAndCleanPath(dstDirPath)
+	err := MakeDir(ctx, storage, dstDirPath)
+	if err != nil {
+		return false, errors.WithMessagef(err, "failed to make dir [%s]", dstDirPath)
+	}
+	parentDir, err := GetUnwrap(ctx, storage, dstDirPath)
+	if err != nil {
+		return false, errors.WithMessagef(err, "failed to get dir [%s]", dstDirPath)
+	}
+	newObj, hit, err := rapidDriver.TryRapidUpload(ctx, parentDir, name, size, hashes)
+	if err != nil {
+		return false, err
+	}
+	if !hit {
+		return false, nil
+	}
+	if newObj != nil {
+		addCacheObj(storage, dstDirPath, model.WrapObjName(newObj))
+	} else if !utils.IsBool(lazyCache...) {
+		ClearCache(storage, dstDirPath)
+	}
+	log.Debugf("rapid-upload [%s] into [%s] done", name, dstDirPath)
+	return true, nil
 }
 
 func PutURL(ctx context.Context, storage driver.Driver, dstDirPath, dstName, url string, lazyCache ...bool) error {

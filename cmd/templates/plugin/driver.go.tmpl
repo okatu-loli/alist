@@ -1,0 +1,97 @@
+// Command {{.Slug}} is an ext-native StorageDriver plugin scaffolded by
+// `alist plugin new`. Fill in List/Link/Get (and any other capabilities you
+// declare) with real logic against your storage backend, then adjust
+// Manifest()'s wizard/permissions/provenance to match before shipping it.
+package main
+
+import (
+	"context"
+	"encoding/json"
+
+	ext "github.com/AlistGo/alist-ext"
+)
+
+// {{.CtorName}} builds the driver.
+func {{.CtorName}}() *{{.TypeName}} { return &{{.TypeName}}{} }
+
+// {{.TypeName}} is a scaffolded StorageDriver. TODO: add real state (HTTP
+// client, per-instance config, ...) here.
+type {{.TypeName}} struct{}
+
+var (
+	_ ext.StorageDriver = (*{{.TypeName}})(nil)
+	_ ext.Getter        = (*{{.TypeName}})(nil)
+)
+
+// Manifest must stay equivalent (as JSON) to plugin.json in this directory:
+// the gRPC GetManifest RPC reads this method at runtime, the install gateway
+// reads plugin.json from the packaged archive. Keep them in sync by hand, and
+// run `alist plugin i18n --dir .` after adding/renaming Additional fields to
+// keep i18n/*.json in sync too.
+func (d *{{.TypeName}}) Manifest() ext.Manifest {
+	return ext.Manifest{
+		ID:      {{printf "%q" .ID}},
+		Name:    map[string]string{"en": {{printf "%q" .Name}}, "zh": {{printf "%q" .Name}}},
+		Version: {{printf "%q" .Version}},
+		CoreAPI: {{printf "%q" .CoreAPI}},
+		Kinds:   []ext.Kind{ext.KindStorageDriver},
+		Capabilities: []ext.Capability{
+			ext.CapGetter,
+		},
+		Provenance: ext.Provenance{
+			Source:  "community",
+			License: "MIT",
+		},
+		Permissions: ext.Permissions{
+			Filesystem: "none",
+		},
+		Info: &ext.Info{
+			Config: ext.DriverConfig{
+				Name: {{printf "%q" .Name}},
+{{- if .HasRootFolderID}}
+				DefaultRoot: "0",
+{{- end}}
+			},
+			Additional: []ext.Item{
+{{- range .Fields}}
+				{Name: {{printf "%q" .Name}}, Type: "string"{{if eq .Name "root_folder_id"}}, Default: "0"{{end}}},
+{{- end}}
+			},
+		},
+	}
+}
+
+func (d *{{.TypeName}}) DriverConfig() ext.DriverConfig {
+	return ext.DriverConfig{
+		Name: {{printf "%q" .Name}},
+{{- if .HasRootFolderID}}
+		DefaultRoot: "0",
+{{- end}}
+	}
+}
+
+func (d *{{.TypeName}}) Init(ctx context.Context, host ext.Host) error { return nil }
+func (d *{{.TypeName}}) Shutdown(ctx context.Context) error           { return nil }
+
+// NewInstance/DropInstance: TODO decode config (the JSON matching this
+// manifest's Info.Additional fields) and set up/tear down per-storage state.
+func (d *{{.TypeName}}) NewInstance(ctx context.Context, storageID string, config json.RawMessage) error {
+	return nil
+}
+func (d *{{.TypeName}}) DropInstance(ctx context.Context, storageID string) error { return nil }
+
+// List: TODO implement.
+func (d *{{.TypeName}}) List(ctx context.Context, dir ext.ObjRef, args ext.ListArgs) ([]ext.Obj, error) {
+	return nil, ext.NewError(ext.ErrCodeNotImplement, "TODO: implement List")
+}
+
+// Link: TODO implement.
+func (d *{{.TypeName}}) Link(ctx context.Context, file ext.ObjRef, args ext.LinkArgs) (*ext.Link, error) {
+	return nil, ext.NewError(ext.ErrCodeNotImplement, "TODO: implement Link")
+}
+
+// Get: TODO implement (or drop the ext.CapGetter capability above and this
+// method if your driver doesn't want the Getter fast path).
+func (d *{{.TypeName}}) Get(ctx context.Context, storageID, path string) (ext.Obj, error) {
+	return ext.Obj{}, ext.NewError(ext.ErrCodeNotImplement, "TODO: implement Get")
+}

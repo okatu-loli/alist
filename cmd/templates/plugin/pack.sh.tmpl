@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# pack.sh — builds {{.Slug}}, then packages+signs it into dist/, and writes
+# dist/index.json a local plugin source can serve (see serve.sh). Shells out
+# to the hidden `alist plugin genkey|sign|pack` commands (same ones an
+# official/community package builder would use); override the binary with
+# ALIST_BIN if `alist` isn't on PATH, e.g.:
+#   ALIST_BIN="go run /path/to/alist" ./pack.sh
+#
+# Output (all gitignored):
+#   dist/plugin            - built {{.Slug}} gRPC binary
+#   dist/mysource.ed25519  - throwaway ed25519 private key (hex), local only
+#   dist/pubkey.hex        - the matching public key (hex), for importing as
+#                            a plugin source's trust root
+#   dist/pkg-{{.Version}}/ - staged package dir (plugin.json + binary + i18n/
+#                            locale files + checksums.txt + signature)
+#   dist/{{.Slug}}-{{.Version}}.tar.gz - packaged, signed plugin archive
+#   dist/index.json         - registry index listing the version
+set -euo pipefail
+
+cd "$(dirname "$0")"
+DIST="dist"
+ALIST_BIN="${ALIST_BIN:-alist}"
+V="{{.Version}}"
+
+echo "==> building {{.Slug}} binary"
+mkdir -p "$DIST"
+go build -o "$DIST/plugin" .
+
+echo "==> generating signing keypair"
+GENOUT="$($ALIST_BIN plugin genkey --out "$DIST/mysource.ed25519")"
+echo "$GENOUT"
+PUBKEY="$(printf '%s\n' "$GENOUT" | sed -n 's/^public key (embed in trustroot.go): //p')"
+if [ -z "$PUBKEY" ]; then
+  echo "pack.sh: could not parse public key from genkey output" >&2
+  exit 1
+fi
+printf '%s' "$PUBKEY" > "$DIST/pubkey.hex"
+echo "==> public key: $PUBKEY"
+
+PKGDIR="$DIST/pkg-$V"
+rm -rf "$PKGDIR"
+mkdir -p "$PKGDIR"
+cp "$DIST/plugin" "$PKGDIR/plugin"
+cp plugin.json "$PKGDIR/plugin.json"
+cp -R i18n "$PKGDIR/i18n"
+
+echo "==> signing $V"
+$ALIST_BIN plugin sign --key "$DIST/mysource.ed25519" --dir "$PKGDIR"
+
+echo "==> packing $V"
+$ALIST_BIN plugin pack --dir "$PKGDIR" --out "$DIST/{{.Slug}}-$V.tar.gz"
+
+SHA="$(shasum -a 256 "$DIST/{{.Slug}}-$V.tar.gz" | awk '{print $1}')"
+SIG="$(tr -d '\n' < "$PKGDIR/signature")"
+
+echo "==> writing index.json"
+python3 - "$DIST" "$V" "$SHA" "$SIG" <<'PYEOF'
+import json
+import os
+import sys
+
+dist, version, sha, sig = sys.argv[1:5]
+entries = [{
+    "id": {{printf "%q" .ID}},
+    "name": {{printf "%q" .Name}},
+    "version": version,
+    "kind": "StorageDriver",
+    "core_api": {{printf "%q" .CoreAPI}},
+    "sha256": sha,
+    "url": "http://127.0.0.1:8767/{{.Slug}}-%s.tar.gz" % version,
+    "sig": sig,
+    "license": "MIT",
+    "pricing": "free",
+}]
+
+out_path = os.path.join(dist, "index.json")
+with open(out_path, "w") as f:
+    json.dump(entries, f, indent=2)
+    f.write("\n")
+
+print("wrote %d entries to %s" % (len(entries), out_path))
+PYEOF
+
+echo "==> done"
+ls -la "$DIST"

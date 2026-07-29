@@ -1,29 +1,38 @@
 package handles
 
 import (
+	"errors"
 	"fmt"
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 	stdpath "path"
 	"strings"
 	"time"
 
+	ext "github.com/AlistGo/alist-ext"
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/errs"
+	"github.com/alist-org/alist/v3/internal/extension"
 	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/internal/setting"
-	"github.com/alist-org/alist/v3/internal/sign"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+	pkgerr "github.com/pkg/errors"
 )
 
 type ListReq struct {
 	model.PageReq
 	Path     string `json:"path" form:"path"`
 	Password string `json:"password" form:"password"`
-	Refresh  bool   `json:"refresh"`
+	Refresh  bool   `json:"refresh" form:"refresh"`
+	// Fields requests extension field groups (comma-separated, "_"-prefixed, e.g.
+	// "_labels,_shares") for the listed page (design §2.6). Base fields always
+	// return; a requested group is computed on demand by its FileDecorator under a
+	// per-group budget, and a group that exceeds the budget is returned in Pending
+	// for the client to backfill via /fs/fields. Empty means no decoration.
+	Fields string `json:"fields" form:"fields"`
 }
 
 type DirReq struct {
@@ -50,20 +59,27 @@ type ObjResp struct {
 }
 
 type FsListResp struct {
-	Content       []ObjLabelResp `json:"content"`
-	Total         int64          `json:"total"`
-	FilteredTotal int64          `json:"filtered_total"`
-	Page          int            `json:"page"`
-	PerPage       int            `json:"per_page"`
-	HasMore       bool           `json:"has_more"`
-	PagesTotal    int            `json:"pages_total"`
-	Readme        string         `json:"readme"`
-	Header        string         `json:"header"`
-	Write         bool           `json:"write"`
-	Provider      string         `json:"provider"`
+	Content       []ObjListResp `json:"content"`
+	Total         int64         `json:"total"`
+	FilteredTotal int64         `json:"filtered_total"`
+	Page          int           `json:"page"`
+	PerPage       int           `json:"per_page"`
+	HasMore       bool          `json:"has_more"`
+	PagesTotal    int           `json:"pages_total"`
+	Readme        string        `json:"readme"`
+	Header        string        `json:"header"`
+	Write         bool          `json:"write"`
+	Provider      string        `json:"provider"`
+	// Fields/Pending carry extension field-group decorations for the listed page
+	// (design §2.6), present only when the request asked for fields. Fields maps
+	// group → ref key (ext.RefKey, the object's virtual path) → column value;
+	// Pending lists the groups whose decorator exceeded its budget, to be
+	// backfilled via /fs/fields.
+	Fields  map[string]map[string]any `json:"fields,omitempty"`
+	Pending []string                  `json:"pending,omitempty"`
 }
 
-type ObjLabelResp struct {
+type ObjListResp struct {
 	Id           string                     `json:"id"`
 	Path         string                     `json:"path"`
 	VirtualPath  string                     `json:"virtual_path"`
@@ -77,7 +93,6 @@ type ObjLabelResp struct {
 	Type         int                        `json:"type"`
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
-	LabelList    []model.Label              `json:"label_list"`
 	StorageClass string                     `json:"storage_class,omitempty"`
 }
 
@@ -87,6 +102,20 @@ const (
 	AllPerPage     = -1
 )
 
+// FsList lists the contents of a directory.
+// @Summary List directory
+// @Description Registered for any HTTP method via gin Any(). Returns paginated directory contents, honoring per-storage/meta permissions.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param body body ListReq true "path/password/pagination/refresh"
+// @Success 200 {object} common.Resp[FsListResp]
+// @Failure 400 {object} common.Resp[any]
+// @Failure 403 {object} common.Resp[any] "password incorrect or no permission"
+// @Failure 500 {object} common.Resp[any]
+// @Router /fs/list [post]
+// @Router /v4/fs/list [get]
 func FsList(c *gin.Context) {
 	var req ListReq
 	if err := c.ShouldBind(&req); err != nil {
@@ -96,27 +125,24 @@ func FsList(c *gin.Context) {
 	effPage, effPerPage := normalizeListPage(req.Page, req.PerPage)
 	req.Page = effPage
 	req.PerPage = effPerPage
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	meta, err := op.GetNearestMeta(reqPath)
-	if err != nil {
-		if !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-			common.ErrorResp(c, err, 500, true)
-			return
-		}
-	}
-	c.Set("meta", meta)
-	if !common.CanAccessWithRoles(user, meta, reqPath, req.Password) {
-		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
+	if err := op.Authorize(c, user, model.ActRead, op.AuthzRequest{Path: reqPath, Password: req.Password}); err != nil {
+		common.AuthzErrorResp(c, err, "password is incorrect or you have no permission")
 		return
 	}
-	perm := common.MergeRolePermissions(user, reqPath)
-	if !common.HasPermission(perm, common.PermWrite) && !common.CanWrite(meta, reqPath) && req.Refresh {
-		common.ErrorStrResp(c, "Refresh without permission", 403)
+	em, err := op.ResolveEffectiveMeta(reqPath)
+	if err != nil {
+		common.ErrorResp(c, err, 500, true)
+		return
+	}
+	canWrite := op.Authorize(c, user, model.ActWrite, op.AuthzRequest{Path: reqPath}) == nil
+	if req.Refresh && !canWrite {
+		common.ErrorI18n(c, "fsread.refresh_without_permission", 403)
 		return
 	}
 	provider := "unknown"
@@ -129,19 +155,13 @@ func FsList(c *gin.Context) {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	filtered := make([]model.Obj, 0, len(objs))
-	for _, obj := range objs {
-		childPath := stdpath.Join(reqPath, obj.GetName())
-		if common.CanReadPathByRole(user, childPath) {
-			filtered = append(filtered, obj)
-		}
-	}
+	filtered := op.FilterListing(c, user, reqPath, objs)
 	total, pageObjs := pagination(filtered, &req.PageReq)
-	respContent := toObjsResp(pageObjs, reqPath, isEncrypt(meta, reqPath))
+	respContent := toObjsResp(pageObjs, reqPath, isEncrypt(reqPath))
 	pagesTotal := calcPagesTotal(total, req.PerPage)
 	hasMore := req.PerPage != AllPerPage && req.Page*req.PerPage < total
 
-	common.SuccessResp(c, FsListResp{
+	resp := FsListResp{
 		Content:       respContent,
 		Total:         int64(total),
 		FilteredTotal: int64(total),
@@ -149,24 +169,124 @@ func FsList(c *gin.Context) {
 		PerPage:       req.PerPage,
 		HasMore:       hasMore,
 		PagesTotal:    pagesTotal,
-		Readme:        getReadme(meta, reqPath),
-		Header:        getHeader(meta, reqPath),
-		Write:         common.HasPermission(perm, common.PermWrite) || common.CanWrite(meta, reqPath),
+		Readme:        em.Readme,
+		Header:        em.Header,
+		Write:         canWrite,
 		Provider:      provider,
-	})
+	}
+	// Extension field groups (design §2.6): only the page's already-filtered
+	// (user-visible) objects are handed to decorators, and only when the client
+	// asked for a group. A slow decorator is returned in Pending, never blocking
+	// the base listing beyond the per-group budget.
+	if groups := splitFields(req.Fields); len(groups) > 0 {
+		refs := make([]ext.ObjRef, 0, len(pageObjs))
+		for _, o := range pageObjs {
+			refs = append(refs, ext.ObjRef{Anchor: stdpath.Join(reqPath, o.GetName())})
+		}
+		fr := extension.DecorateFields(c, extension.DefaultRegistry, groups, refs, 0)
+		resp.Fields = fr.Fields
+		resp.Pending = fr.Pending
+	}
+	common.SuccessResp(c, resp)
 }
 
+// FieldsReq backfills extension field groups the initial /fs/list marked pending
+// (design §2.6). Refs are the virtual paths (base-path relative, like /fs/list's
+// path) whose columns to compute; Fields is the comma-separated group list.
+type FieldsReq struct {
+	Refs   string `json:"refs" form:"refs"`
+	Fields string `json:"fields" form:"fields"`
+}
+
+// FsFields computes extension field groups for a set of refs — the backfill for
+// groups /fs/list returned as pending (design §2.6). It authorizes each ref for
+// the requesting user (read) and hands the decorators ONLY the refs the user may
+// see, so it can never be used to probe objects outside the user's view.
+// @Summary Backfill extension field groups
+// @Description Recomputes the requested extension field groups (e.g. _labels) for a set of refs, for columns /fs/list returned as pending. Each ref is base-path joined and authorized for the user before it is handed to any decorator.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Produce json
+// @Param refs query string true "comma-separated virtual paths"
+// @Param fields query string true "comma-separated field groups"
+// @Success 200 {object} common.Resp[extension.FieldResult]
+// @Router /v4/fs/fields [get]
+// maxFieldsRefs caps how many refs one /fs/fields backfill may decorate — a
+// listing page is at most a screenful, so a larger fan-out is abuse.
+const maxFieldsRefs = 500
+
+func FsFields(c *gin.Context) {
+	var req FieldsReq
+	if err := c.ShouldBind(&req); err != nil {
+		common.ErrorResp(c, err, 400)
+		return
+	}
+	groups := splitFields(req.Fields)
+	if len(groups) == 0 {
+		common.SuccessResp(c, extension.FieldResult{})
+		return
+	}
+	user := c.MustGet(ctxkey.User).(*model.User)
+	reqRefs := splitFields(req.Refs)
+	// Cap the backfill fan-out: a page is at most a screenful, so a caller asking
+	// to decorate thousands of refs at once is abuse (each ref is an Authorize +
+	// a decorator call). Bound it (F2 red-team: /fs/fields refs were unbounded).
+	if len(reqRefs) > maxFieldsRefs {
+		reqRefs = reqRefs[:maxFieldsRefs]
+	}
+	var refs []ext.ObjRef
+	for _, p := range reqRefs {
+		full, err := user.JoinPath(p)
+		if err != nil {
+			continue
+		}
+		if op.Authorize(c, user, model.ActRead, op.AuthzRequest{Path: full}) != nil {
+			continue // silently drop refs the user may not see
+		}
+		refs = append(refs, ext.ObjRef{Anchor: full})
+	}
+	common.SuccessResp(c, extension.DecorateFields(c, extension.DefaultRegistry, groups, refs, 0))
+}
+
+// splitFields splits a comma-separated field/ref list, trimming blanks.
+func splitFields(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// FsDirs lists only the subdirectories of a path.
+// @Summary List subdirectories
+// @Description Registered for any HTTP method via gin Any(). If force_root is set, requires admin and bypasses the user's base path.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param body body DirReq true "path/password/force_root"
+// @Success 200 {object} common.Resp[[]DirResp]
+// @Failure 400 {object} common.Resp[any]
+// @Failure 403 {object} common.Resp[any] "password incorrect, no permission, or force_root without admin"
+// @Failure 500 {object} common.Resp[any]
+// @Router /fs/dirs [post]
+// @Router /v4/fs/dirs [get]
 func FsDirs(c *gin.Context) {
 	var req DirReq
 	if err := c.ShouldBind(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	reqPath := req.Path
 	if req.ForceRoot {
 		if !user.IsAdmin() {
-			common.ErrorStrResp(c, "Permission denied", 403)
+			common.ErrorI18n(c, "errs.permission_denied", 403)
 			return
 		}
 	} else {
@@ -177,16 +297,8 @@ func FsDirs(c *gin.Context) {
 		}
 		reqPath = tmp
 	}
-	meta, err := op.GetNearestMeta(reqPath)
-	if err != nil {
-		if !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-			common.ErrorResp(c, err, 500, true)
-			return
-		}
-	}
-	c.Set("meta", meta)
-	if !common.CanAccessWithRoles(user, meta, reqPath, req.Password) {
-		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
+	if err := op.Authorize(c, user, model.ActRead, op.AuthzRequest{Path: reqPath, Password: req.Password}); err != nil {
+		common.AuthzErrorResp(c, err, "password is incorrect or you have no permission")
 		return
 	}
 	objs, err := fs.List(c, reqPath, &fs.ListArgs{})
@@ -194,13 +306,7 @@ func FsDirs(c *gin.Context) {
 		common.ErrorResp(c, err, 500)
 		return
 	}
-	visible := make([]model.Obj, 0, len(objs))
-	for _, obj := range objs {
-		childPath := stdpath.Join(reqPath, obj.GetName())
-		if common.CanReadPathByRole(user, childPath) {
-			visible = append(visible, obj)
-		}
-	}
+	visible := op.FilterListing(c, user, reqPath, objs)
 	dirs := filterDirs(visible)
 	common.SuccessResp(c, dirs)
 }
@@ -223,31 +329,25 @@ func filterDirs(objs []model.Obj) []DirResp {
 	return dirs
 }
 
-func getReadme(meta *model.Meta, path string) string {
-	if meta != nil && (utils.PathEqual(meta.Path, path) || meta.RSub) {
-		return meta.Readme
-	}
-	return ""
-}
-
-func getHeader(meta *model.Meta, path string) string {
-	if meta != nil && (utils.PathEqual(meta.Path, path) || meta.HeaderSub) {
-		return meta.Header
-	}
-	return ""
-}
-
-func isEncrypt(meta *model.Meta, path string) bool {
-	if common.IsStorageSignEnabled(path) {
+// isEncrypt reports whether reqPath requires a sign query param on raw URLs.
+// This is legacy nearest-meta sign semantics (Step 6 will redefine sign
+// scoping against EffectiveMeta); kept self-contained here since Task 4
+// already removed the caller-side nearest-meta fetch.
+func isEncrypt(reqPath string) bool {
+	if common.IsStorageSignEnabled(reqPath) {
 		return true
 	}
-	if meta == nil || meta.Password == "" {
+	meta, err := op.GetNearestMeta(reqPath)
+	if err != nil {
+		// MetaNotFound = genuinely no meta → not encrypted. Any other error is
+		// a lookup failure: fail closed (require a signature) rather than hand
+		// out an unsigned link for a path that might be protected.
+		return !errors.Is(err, errs.MetaNotFound) && pkgerr.Cause(err) != errs.MetaNotFound
+	}
+	if meta.Password == "" {
 		return false
 	}
-	if !utils.PathEqual(meta.Path, path) && !meta.PSub {
-		return false
-	}
-	return true
+	return utils.PathEqual(meta.Path, reqPath) || meta.PSub
 }
 
 func normalizeListPage(page, perPage int) (int, int) {
@@ -298,26 +398,13 @@ func pagination(objs []model.Obj, req *model.PageReq) (int, []model.Obj) {
 	return total, objs[start:end]
 }
 
-func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjLabelResp {
-	var resp []ObjLabelResp
-
-	names := make([]string, 0, len(objs))
-	for _, obj := range objs {
-		if !obj.IsDir() {
-			names = append(names, obj.GetName())
-		}
-	}
-
-	labelsByName, _ := op.GetLabelsByFileNamesPublic(names)
+func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjListResp {
+	var resp []ObjListResp
 
 	for _, obj := range objs {
-		var labels []model.Label
-		if !obj.IsDir() {
-			labels = labelsByName[obj.GetName()]
-		}
 		thumb, _ := model.GetThumb(obj)
 		storageClass, _ := model.GetStorageClass(obj)
-		resp = append(resp, ObjLabelResp{
+		resp = append(resp, ObjListResp{
 			Id:           obj.GetID(),
 			Path:         obj.GetPath(),
 			VirtualPath:  utils.FixAndCleanPath(stdpath.Join(parent, obj.GetName())),
@@ -331,7 +418,6 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjLabelResp {
 			Sign:         common.Sign(obj, parent, encrypt),
 			Thumb:        thumb,
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
-			LabelList:    labels,
 			StorageClass: storageClass,
 		})
 	}
@@ -345,36 +431,47 @@ type FsGetReq struct {
 
 type FsGetResp struct {
 	ObjResp
-	RawURL   string         `json:"raw_url"`
-	Readme   string         `json:"readme"`
-	Header   string         `json:"header"`
-	Provider string         `json:"provider"`
-	WebProxy bool           `json:"web_proxy"`
-	Related  []ObjLabelResp `json:"related"`
+	RawURL   string        `json:"raw_url"`
+	Readme   string        `json:"readme"`
+	Header   string        `json:"header"`
+	Provider string        `json:"provider"`
+	WebProxy bool          `json:"web_proxy"`
+	Related  []ObjListResp `json:"related"`
 }
 
+// FsGet returns metadata plus a raw/preview URL for a single file or directory.
+// @Summary Get file/directory info
+// @Description Registered for any HTTP method via gin Any(). For files, resolves a raw_url (direct link, proxy link, or storage-provided URL depending on driver settings).
+// @Tags fs
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param body body FsGetReq true "path/password"
+// @Success 200 {object} common.Resp[FsGetResp]
+// @Failure 400 {object} common.Resp[any]
+// @Failure 403 {object} common.Resp[any] "password incorrect or no permission"
+// @Failure 500 {object} common.Resp[any]
+// @Router /fs/get [post]
+// @Router /v4/fs/get [get]
 func FsGet(c *gin.Context) {
 	var req FsGetReq
 	if err := c.ShouldBind(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	meta, err := op.GetNearestMeta(reqPath)
-	if err != nil {
-		if !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-			common.ErrorResp(c, err, 500)
-			return
-		}
+	if err := op.Authorize(c, user, model.ActRead, op.AuthzRequest{Path: reqPath, Password: req.Password}); err != nil {
+		common.AuthzErrorResp(c, err, "password is incorrect or you have no permission")
+		return
 	}
-	c.Set("meta", meta)
-	if !common.CanAccessWithRoles(user, meta, reqPath, req.Password) {
-		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
+	em, err := op.ResolveEffectiveMeta(reqPath)
+	if err != nil {
+		common.ErrorResp(c, err, 500, true)
 		return
 	}
 	obj, err := fs.Get(c, reqPath, &fs.GetArgs{})
@@ -395,8 +492,8 @@ func FsGet(c *gin.Context) {
 			return
 		}
 		query := ""
-		if isEncrypt(meta, reqPath) || setting.GetBool(conf.SignAll) {
-			query = "?sign=" + sign.Sign(reqPath)
+		if isEncrypt(reqPath) || setting.GetBool(conf.SignAll) {
+			query = "?sign=" + common.SignPath(reqPath)
 		}
 		forceRedirectRawURL := storage.GetStorage().Driver == "BaiduYouth"
 		forcePreviewRawURL := storage.GetStorage().Driver == "Lark" && isLarkCloudDocName(obj.GetName())
@@ -438,6 +535,7 @@ func FsGet(c *gin.Context) {
 					common.ErrorResp(c, err, 500)
 					return
 				}
+				common.CompleteLink(c.Request, link)
 				rawURL = link.URL
 			}
 		}
@@ -446,9 +544,9 @@ func FsGet(c *gin.Context) {
 	parentPath := stdpath.Dir(reqPath)
 	sameLevelFiles, err := fs.List(c, parentPath, &fs.ListArgs{})
 	if err == nil {
+		sameLevelFiles = op.FilterListing(c, user, parentPath, sameLevelFiles)
 		related = filterRelated(sameLevelFiles, obj)
 	}
-	parentMeta, _ := op.GetNearestMeta(parentPath)
 	thumb, _ := model.GetThumb(obj)
 	storageClass, _ := model.GetStorageClass(obj)
 	common.SuccessResp(c, FsGetResp{
@@ -463,17 +561,17 @@ func FsGet(c *gin.Context) {
 			Created:      obj.CreateTime(),
 			HashInfoStr:  obj.GetHash().String(),
 			HashInfo:     obj.GetHash().Export(),
-			Sign:         common.Sign(obj, parentPath, isEncrypt(meta, reqPath)),
+			Sign:         common.Sign(obj, parentPath, isEncrypt(reqPath)),
 			Type:         utils.GetFileType(obj.GetName()),
 			Thumb:        thumb,
 			StorageClass: storageClass,
 		},
 		RawURL:   rawURL,
-		Readme:   getReadme(meta, reqPath),
-		Header:   getHeader(meta, reqPath),
+		Readme:   em.Readme,
+		Header:   em.Header,
 		Provider: provider,
 		WebProxy: storageErr == nil && storage.GetStorage().WebProxy,
-		Related:  toObjsResp(related, parentPath, isEncrypt(parentMeta, parentPath)),
+		Related:  toObjsResp(related, parentPath, isEncrypt(parentPath)),
 	})
 }
 
@@ -512,29 +610,35 @@ type FsOtherReq struct {
 	Password string `json:"password" form:"password"`
 }
 
+// FsOther invokes a driver-specific "other" method (e.g. decompress, offline-download list) on a path.
+// @Summary Driver-specific other operation
+// @Description Registered for any HTTP method via gin Any(). The method/data fields are opaque and driver-defined; response shape varies by driver and method.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param body body FsOtherReq true "path/password/method/data"
+// @Success 200 {object} common.Resp[any]
+// @Failure 400 {object} common.Resp[any]
+// @Failure 403 {object} common.Resp[any] "password incorrect or no permission"
+// @Failure 500 {object} common.Resp[any]
+// @Router /fs/other [post]
+// @Router /v4/fs/other [post]
 func FsOther(c *gin.Context) {
 	var req FsOtherReq
 	if err := c.ShouldBind(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	var err error
 	req.Path, err = user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	meta, err := op.GetNearestMeta(req.Path)
-	if err != nil {
-		if !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-			common.ErrorResp(c, err, 500)
-			return
-		}
-	}
-	c.Set("meta", meta)
-	if !common.CanAccessWithRoles(user, meta, req.Path, req.Password) {
-		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
+	if err := op.Authorize(c, user, model.ActRead, op.AuthzRequest{Path: req.Path, Password: req.Password}); err != nil {
+		common.AuthzErrorResp(c, err, "password is incorrect or you have no permission")
 		return
 	}
 	res, err := fs.Other(c, req.FsOtherArgs)

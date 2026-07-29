@@ -17,10 +17,6 @@ import (
 var roleCache = cache.NewMemCache[*model.Role](cache.WithShards[*model.Role](2))
 var roleG singleflight.Group[*model.Role]
 
-func init() {
-	model.FetchRole = GetRole
-}
-
 func enforceAdminRoleDefaults(r *model.Role) error {
 	if r == nil || r.Name != "admin" {
 		return nil
@@ -36,7 +32,11 @@ func enforceAdminRoleDefaults(r *model.Role) error {
 	r.PermissionScopes = []model.PermissionEntry{
 		{Path: "/", Permission: 0xFFFF},
 	}
-	return db.UpdateRole(r)
+	if err := db.UpdateRoleWithScopePermissions(r, scopePermissionRows(r)); err != nil {
+		return err
+	}
+	invalidateRolePolicy(r.ID)
+	return nil
 }
 
 func GetRole(id uint) (*model.Role, error) {
@@ -141,9 +141,10 @@ func CreateRole(r *model.Role) error {
 	}
 	roleCache.Del(fmt.Sprint(r.ID))
 	roleCache.Del(r.Name)
-	if err := db.CreateRole(r); err != nil {
+	if err := db.CreateRoleWithScopePermissions(r, scopePermissionRows(r)); err != nil {
 		return err
 	}
+	invalidateRolePolicy(r.ID)
 	if r.Default {
 		roleCache.Clear()
 		item, err := GetSettingItemByKey(conf.DefaultRole)
@@ -163,40 +164,20 @@ func UpdateRole(r *model.Role) error {
 	if err != nil {
 		return err
 	}
-	switch old.Name {
-	case "admin":
+	// Protected roles (admin/guest and future presets) may not be renamed or
+	// deleted (spec §4.1). Other edits (e.g. permission scopes) are allowed.
+	if old.Protected && r.Name != old.Name {
 		return errs.ErrChangeDefaultRole
-	case "guest":
-		r.Name = "guest"
 	}
 	for i := range r.PermissionScopes {
 		r.PermissionScopes[i].Path = utils.FixAndCleanPath(r.PermissionScopes[i].Path)
 	}
-	//if len(old.PermissionScopes) > 0 && len(r.PermissionScopes) > 0 &&
-	//	old.PermissionScopes[0].Path != r.PermissionScopes[0].Path {
-	//
-	//	oldPath := old.PermissionScopes[0].Path
-	//	newPath := r.PermissionScopes[0].Path
-	//
-	//	users, err := db.GetUsersByRole(int(r.ID))
-	//	if err != nil {
-	//		return errors.WithMessage(err, "failed to get users by role")
-	//	}
-	//
-	//	modifiedUsernames, err := db.UpdateUserBasePathPrefix(oldPath, newPath, users)
-	//	if err != nil {
-	//		return errors.WithMessage(err, "failed to update user base path when role updated")
-	//	}
-	//
-	//	for _, name := range modifiedUsernames {
-	//		userCache.Del(name)
-	//	}
-	//}
 	roleCache.Del(fmt.Sprint(r.ID))
 	roleCache.Del(r.Name)
-	if err := db.UpdateRole(r); err != nil {
+	if err := db.UpdateRoleWithScopePermissions(r, scopePermissionRows(r)); err != nil {
 		return err
 	}
+	invalidateRolePolicy(r.ID)
 	if r.Default {
 		roleCache.Clear()
 		item, err := GetSettingItemByKey(conf.DefaultRole)
@@ -216,10 +197,20 @@ func DeleteRole(id uint) error {
 	if err != nil {
 		return err
 	}
-	if old.Name == "admin" || old.Name == "guest" {
+	if old.Protected {
 		return errs.ErrChangeDefaultRole
 	}
 	roleCache.Del(fmt.Sprint(id))
 	roleCache.Del(old.Name)
-	return db.DeleteRole(id)
+	if err := db.DeleteScopePermissionsByRole(id); err != nil {
+		return err
+	}
+	if err := db.DeleteRolePermissionsByRole(id); err != nil {
+		return err
+	}
+	if err := db.DeleteRole(id); err != nil {
+		return err
+	}
+	invalidateRolePolicy(id)
+	return nil
 }

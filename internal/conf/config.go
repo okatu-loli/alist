@@ -20,12 +20,6 @@ type Database struct {
 	DSN         string `json:"dsn" env:"DSN"`
 }
 
-type Meilisearch struct {
-	Host        string `json:"host" env:"HOST"`
-	APIKey      string `json:"api_key" env:"API_KEY"`
-	IndexPrefix string `json:"index_prefix" env:"INDEX_PREFIX"`
-}
-
 type Scheme struct {
 	Address      string `json:"address" env:"ADDR"`
 	HttpPort     int    `json:"http_port" env:"HTTP_PORT"`
@@ -45,6 +39,9 @@ type LogConfig struct {
 	MaxBackups int    `json:"max_backups" env:"MAX_BACKUPS"`
 	MaxAge     int    `json:"max_age" env:"MAX_AGE"`
 	Compress   bool   `json:"compress" env:"COMPRESS"`
+	// Lang selects the locale for operator-facing (OPS) lifecycle/error logs
+	// (see internal/i18n.Log). Default "en" keeps English log output.
+	Lang string `json:"lang" env:"LOG_LANG"`
 }
 
 type TaskConfig struct {
@@ -54,13 +51,9 @@ type TaskConfig struct {
 }
 
 type TasksConfig struct {
-	Download           TaskConfig `json:"download" envPrefix:"DOWNLOAD_"`
-	Transfer           TaskConfig `json:"transfer" envPrefix:"TRANSFER_"`
 	Upload             TaskConfig `json:"upload" envPrefix:"UPLOAD_"`
 	Copy               TaskConfig `json:"copy" envPrefix:"COPY_"`
-	Decompress         TaskConfig `json:"decompress" envPrefix:"DECOMPRESS_"`
-	DecompressUpload   TaskConfig `json:"decompress_upload" envPrefix:"DECOMPRESS_UPLOAD_"`
-	S3Transition       TaskConfig `json:"s3_transition" envPrefix:"S3_TRANSITION_"`
+	Download           TaskConfig `json:"download" envPrefix:"DOWNLOAD_"`
 	AllowRetryCanceled bool       `json:"allow_retry_canceled" env:"ALLOW_RETRY_CANCELED"`
 }
 
@@ -70,35 +63,6 @@ type Cors struct {
 	AllowHeaders []string `json:"allow_headers" env:"ALLOW_HEADERS"`
 }
 
-type S3 struct {
-	Enable bool `json:"enable" env:"ENABLE"`
-	Port   int  `json:"port" env:"PORT"`
-	SSL    bool `json:"ssl" env:"SSL"`
-}
-
-type FTP struct {
-	Enable                  bool   `json:"enable" env:"ENABLE"`
-	Listen                  string `json:"listen" env:"LISTEN"`
-	FindPasvPortAttempts    int    `json:"find_pasv_port_attempts" env:"FIND_PASV_PORT_ATTEMPTS"`
-	ActiveTransferPortNon20 bool   `json:"active_transfer_port_non_20" env:"ACTIVE_TRANSFER_PORT_NON_20"`
-	IdleTimeout             int    `json:"idle_timeout" env:"IDLE_TIMEOUT"`
-	ConnectionTimeout       int    `json:"connection_timeout" env:"CONNECTION_TIMEOUT"`
-	DisableActiveMode       bool   `json:"disable_active_mode" env:"DISABLE_ACTIVE_MODE"`
-	DefaultTransferBinary   bool   `json:"default_transfer_binary" env:"DEFAULT_TRANSFER_BINARY"`
-	EnableActiveConnIPCheck bool   `json:"enable_active_conn_ip_check" env:"ENABLE_ACTIVE_CONN_IP_CHECK"`
-	EnablePasvConnIPCheck   bool   `json:"enable_pasv_conn_ip_check" env:"ENABLE_PASV_CONN_IP_CHECK"`
-}
-
-type SFTP struct {
-	Enable bool   `json:"enable" env:"ENABLE"`
-	Listen string `json:"listen" env:"LISTEN"`
-}
-
-type MCP struct {
-	Enable bool `json:"enable" env:"ENABLE"`
-	Port   int  `json:"port" env:"PORT"`
-}
-
 type Config struct {
 	Force                 bool        `json:"force" env:"FORCE"`
 	SiteURL               string      `json:"site_url" env:"SITE_URL"`
@@ -106,10 +70,8 @@ type Config struct {
 	JwtSecret             string      `json:"jwt_secret" env:"JWT_SECRET"`
 	TokenExpiresIn        int         `json:"token_expires_in" env:"TOKEN_EXPIRES_IN"`
 	Database              Database    `json:"database" envPrefix:"DB_"`
-	Meilisearch           Meilisearch `json:"meilisearch" envPrefix:"MEILISEARCH_"`
 	Scheme                Scheme      `json:"scheme"`
 	TempDir               string      `json:"temp_dir" env:"TEMP_DIR"`
-	BleveDir              string      `json:"bleve_dir" env:"BLEVE_DIR"`
 	DistDir               string      `json:"dist_dir"`
 	Log                   LogConfig   `json:"log"`
 	DelayedStart          int         `json:"delayed_start" env:"DELAYED_START"`
@@ -118,18 +80,28 @@ type Config struct {
 	TlsInsecureSkipVerify bool        `json:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
 	Tasks                 TasksConfig `json:"tasks" envPrefix:"TASKS_"`
 	Cors                  Cors        `json:"cors" envPrefix:"CORS_"`
-	S3                    S3          `json:"s3" envPrefix:"S3_"`
-	FTP                   FTP         `json:"ftp" envPrefix:"FTP_"`
-	SFTP                  SFTP        `json:"sftp" envPrefix:"SFTP_"`
-	MCP                   MCP         `json:"mcp" envPrefix:"MCP_"`
 	LastLaunchedVersion   string      `json:"last_launched_version"`
+	// BleveDir is the on-disk directory the bleve SearchIndexer backend stores
+	// its index under (子项目 A, wired in A5). Defaults to <data>/bleve.
+	BleveDir string `json:"bleve_dir" env:"BLEVE_DIR"`
+	// Meilisearch configures the external meilisearch SearchIndexer backend
+	// (子项目 A, wired in A6). Declared now so the config-file contract is stable.
+	Meilisearch Meilisearch `json:"meilisearch" envPrefix:"MEILISEARCH_"`
+}
+
+// Meilisearch is the connection config for the meilisearch SearchIndexer
+// backend. IndexPrefix namespaces this instance's indexes on a shared server.
+type Meilisearch struct {
+	Host        string `json:"host" env:"HOST"`
+	APIKey      string `json:"api_key" env:"API_KEY"`
+	IndexPrefix string `json:"index_prefix" env:"INDEX_PREFIX"`
 }
 
 func DefaultConfig() *Config {
 	tempDir := filepath.Join(flags.DataDir, "temp")
-	indexDir := filepath.Join(flags.DataDir, "bleve")
 	logPath := filepath.Join(flags.DataDir, "log/log.log")
 	dbPath := filepath.Join(flags.DataDir, "data.db")
+	bleveDir := filepath.Join(flags.DataDir, "bleve")
 	return &Config{
 		Scheme: Scheme{
 			Address:    "0.0.0.0",
@@ -149,52 +121,36 @@ func DefaultConfig() *Config {
 			TablePrefix: "x_",
 			DBFile:      dbPath,
 		},
-		Meilisearch: Meilisearch{
-			Host: "http://localhost:7700",
-		},
-		BleveDir: indexDir,
 		Log: LogConfig{
 			Enable:     true,
 			Name:       logPath,
 			MaxSize:    50,
 			MaxBackups: 30,
 			MaxAge:     28,
+			Lang:       "en",
 		},
 		MaxConnections:        0,
 		MaxConcurrency:        64,
 		TlsInsecureSkipVerify: false,
 		Tasks: TasksConfig{
-			Download: TaskConfig{
-				Workers:  5,
-				MaxRetry: 1,
-				// TaskPersistant: true,
-			},
-			Transfer: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-				// TaskPersistant: true,
-			},
 			Upload: TaskConfig{
-				Workers: 5,
+				Workers:        5,
+				TaskPersistant: true,
 			},
 			Copy: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-				// TaskPersistant: true,
+				Workers:        5,
+				MaxRetry:       2,
+				TaskPersistant: true,
 			},
-			Decompress: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-				// TaskPersistant: true,
-			},
-			DecompressUpload: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-			},
-			S3Transition: TaskConfig{
-				Workers:  5,
-				MaxRetry: 2,
-				// TaskPersistant: true,
+			// Offline downloads re-fetch from the source URL on resume (no
+			// on-disk temp file to relocate like uploads), so a modest retry
+			// budget covers transient network/redirect failures. Persistence
+			// keeps queued/in-flight downloads across a restart since the whole
+			// task state is JSON-serializable (URL + destination).
+			Download: TaskConfig{
+				Workers:        3,
+				MaxRetry:       2,
+				TaskPersistant: true,
 			},
 			AllowRetryCanceled: false,
 		},
@@ -203,31 +159,10 @@ func DefaultConfig() *Config {
 			AllowMethods: []string{"*"},
 			AllowHeaders: []string{"*"},
 		},
-		S3: S3{
-			Enable: false,
-			Port:   5246,
-			SSL:    false,
-		},
-		FTP: FTP{
-			Enable:                  false,
-			Listen:                  ":5221",
-			FindPasvPortAttempts:    50,
-			ActiveTransferPortNon20: false,
-			IdleTimeout:             900,
-			ConnectionTimeout:       30,
-			DisableActiveMode:       false,
-			DefaultTransferBinary:   false,
-			EnableActiveConnIPCheck: true,
-			EnablePasvConnIPCheck:   true,
-		},
-		SFTP: SFTP{
-			Enable: false,
-			Listen: ":5222",
-		},
-		MCP: MCP{
-			Enable: false,
-			Port:   5248,
-		},
 		LastLaunchedVersion: "",
+		BleveDir:            bleveDir,
+		Meilisearch: Meilisearch{
+			Host: "http://localhost:7700",
+		},
 	}
 }

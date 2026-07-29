@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// ArchiveToolService mirrors ext.ArchiveTool (Phase E wave 2): a
+// Kind=ArchiveTool plugin lets internal/archive's dispatch layer look inside
+// an archive format the built-in zip tool doesn't cover (rar/7z/...) through
+// the exact same Meta/List/Extract path. Mirrors SearchIndexerService /
+// OfflineDownloadToolService one Kind over, including the reverse-host
+// InitHost bridge (F0/SP6): Exts/Meta/List/Extract are the 4 business methods
+// from ext.ArchiveTool (ext/archive_tool.go), GetManifest is the handshake,
+// InitHost is the reverse bridge.
+//
+// Extract server-streams the entry's bytes (like DriverService.OpenRange) --
+// the first ArchiveChunk on the stream carries the entry's total size, every
+// message carries a data slice, and a non-empty error terminates the stream.
+service ArchiveToolService {
+  // GetManifest is the handshake: the manifest the host validates the plugin
+  // against before dispatching to it.
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // Exts reports the lowercase, dot-less file extensions this tool claims
+  // (ext.ArchiveTool.Exts) -- the host dispatch layer matches a requested
+  // archive's extension against this to decide whether this plugin handles
+  // it.
+  rpc Exts(Empty) returns (ArchiveExtsReply);
+
+  // Meta returns an archive's meta-info (ext.ArchiveTool.Meta): entry count,
+  // whether any entry is encrypted, and the total declared uncompressed size.
+  rpc Meta(ArchiveMetaRequest) returns (ArchiveMetaReply);
+
+  // List returns the immediate children of inner_path within the archive
+  // (ext.ArchiveTool.List) -- inner_path=="" means the archive root.
+  rpc List(ArchiveListRequest) returns (ArchiveListReply);
+
+  // Extract opens ONE inner file entry for streaming (ext.ArchiveTool.
+  // Extract). inner_path must name a file, not a directory.
+  rpc Extract(ArchiveExtractRequest) returns (stream ArchiveChunk);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id
+  // it passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+// ArchiveSourceProto mirrors ext.ArchiveSource's wire-safe half (Path/Size
+// only -- ReaderAt is in-process-only and never crosses the wire, see
+// ext.ArchiveSource's doc comment): the host has ALWAYS localized the
+// archive's full content to a local temp file named by path before dispatching
+// to a gRPC ArchiveTool, since a live byte-range handle cannot itself cross
+// the plugin process boundary.
+message ArchiveSourceProto {
+  string path = 1;
+  int64 size = 2;
+}
+
+message ArchiveExtsReply {
+  repeated string exts = 1;
+}
+
+message ArchiveMetaRequest {
+  ArchiveSourceProto src = 1;
+  string password = 2;
+}
+
+// ArchiveMetaReply mirrors ext.ArchiveToolMeta field-for-field.
+message ArchiveMetaReply {
+  string comment = 1;
+  bool encrypted = 2;
+  int32 entry_count = 3;
+  int64 total_uncompressed_size = 4;
+  ErrorProto error = 5;
+}
+
+message ArchiveListRequest {
+  ArchiveSourceProto src = 1;
+  string inner_path = 2;
+  string password = 3;
+}
+
+// ArchiveEntryProto mirrors ext.ArchiveEntry field-for-field. modified_unix_nano
+// is time.Time.UnixNano() -- a plain int64 crosses the wire more simply than a
+// timestamp message for this one field.
+message ArchiveEntryProto {
+  string name = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  int64 modified_unix_nano = 4;
+}
+
+message ArchiveListReply {
+  repeated ArchiveEntryProto entries = 1;
+  ErrorProto error = 2;
+}
+
+message ArchiveExtractRequest {
+  ArchiveSourceProto src = 1;
+  string inner_path = 2;
+  string password = 3;
+}
+
+// ArchiveChunk is one slice of Extract's byte stream (mirrors driver.proto's
+// Chunk, under a distinct name since both live in the same package). size
+// carries the entry's total declared uncompressed size and is only ever set
+// on the FIRST message of the stream (0 on every message after); error set
+// (non-empty code) terminates the stream.
+message ArchiveChunk {
+  bytes data = 1;
+  int64 size = 2;
+  ErrorProto error = 3;
+}

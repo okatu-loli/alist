@@ -1,0 +1,65 @@
+{
+  "id": "com.example.demoplugin",
+  "name": { "en": "Demo Plugin", "zh": "演示插件" },
+  "version": "0.2.0",
+  "core_api": "^0.1.0",
+  "kinds": ["StorageDriver"],
+  "capabilities": ["Getter"],
+  "provenance": {
+    "source": "community",
+    "license": "MIT",
+    "source_url": "https://github.com/example/demo-plugin",
+    "pricing": "free"
+  },
+  "permissions": { "filesystem": "none", "network": ["api.example.com"] },
+  "wizard": {
+    "steps": [
+      {
+        "id": "welcome",
+        "type": "info",
+        "title": { "en": "Welcome", "zh": "欢迎" },
+        "body": { "en": "This wizard configures the demo plugin.", "zh": "本向导用于配置演示插件。" }
+      },
+      {
+        "id": "config",
+        "type": "form",
+        "title": { "en": "Configure", "zh": "配置" },
+        "schema": {
+          "type": "object",
+          "required": ["label"],
+          "properties": {
+            "label": { "type": "string", "title": { "en": "Label", "zh": "标签" } }
+          }
+        }
+      },
+      {
+        "id": "probe",
+        "type": "test",
+        "title": { "en": "Connectivity", "zh": "连通性测试" },
+        "probe_id": "connect"
+      },
+      {
+        "id": "finish",
+        "type": "done",
+        "title": { "en": "Done", "zh": "完成" }
+      }
+    ]
+  },
+  "contributions": {
+    "config_form": {
+      "type": "object",
+      "required": ["greeting"],
+      "properties": {
+        "greeting": { "type": "string", "default": "hello", "title": { "en": "Greeting", "zh": "问候语" } }
+      }
+    },
+    "menu_actions": [
+      {
+        "id": "ping",
+        "label": { "en": "Ping", "zh": "测试连通" },
+        "icon": "wifi",
+        "target": "global"
+      }
+    ]
+  }
+}

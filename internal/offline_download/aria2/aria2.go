@@ -4,125 +4,147 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"time"
+	"sync"
 
-	"github.com/alist-org/alist/v3/internal/errs"
+	ext "github.com/AlistGo/alist-ext"
 
 	"github.com/alist-org/alist/v3/internal/conf"
-	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/internal/offline_download/tool"
 	"github.com/alist-org/alist/v3/internal/setting"
-	"github.com/alist-org/alist/v3/pkg/aria2/rpc"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 )
 
-var notify = NewNotify()
+const (
+	// ExtensionID is the manageable built-in extension id this tool registers
+	// under. It differs from ToolName: the offline_download_tool setting selects
+	// on ToolName, while the enabled-gate is keyed on this extension id.
+	ExtensionID = "builtin.offline_download.aria2"
+	// ToolName is the stable tool identity the offline_download_tool setting
+	// selects on and Config().Name reports.
+	ToolName = "aria2"
+)
 
-type Aria2 struct {
-	client rpc.Client
+// Tool is the aria2 ext.OfflineDownloadTool. It lazily (re)builds its minimal
+// JSON-RPC client from the aria2_uri / aria2_secret settings and gates readiness
+// on an aria2.getVersion probe: a down/misconfigured daemon makes AddURL/Status
+// return a clear error, which is non-fatal at registration time (offline
+// download simply keeps falling back to SimpleHttp until the daemon is up).
+type Tool struct {
+	mu         sync.Mutex
+	client     *Client
+	lastURI    string
+	lastSecret string
 }
 
-func (a *Aria2) Run(task *tool.DownloadTask) error {
-	return errs.NotSupport
-}
+// Compile-time proof the tool satisfies the extension contract.
+var _ ext.OfflineDownloadTool = (*Tool)(nil)
 
-func (a *Aria2) Name() string {
-	return "aria2"
-}
+// --- ext.Extension ---
 
-func (a *Aria2) Items() []model.SettingItem {
-	// aria2 settings
-	return []model.SettingItem{
-		{Key: conf.Aria2Uri, Value: "http://localhost:6800/jsonrpc", Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-		{Key: conf.Aria2Secret, Value: "", Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
+// Manifest identifies aria2 as an independent built-in of Kind
+// OfflineDownloadTool. Its config lives in the shared OFFLINE_DOWNLOAD settings
+// group (the /@manage/setting/offline_download page the base surfaces); this
+// manifest only names the extension for the registry.
+func (*Tool) Manifest() ext.Manifest {
+	return ext.Manifest{
+		ID:    ExtensionID,
+		Name:  map[string]string{"en": "Offline: aria2", "zh": "离线下载:aria2"},
+		Kinds: []ext.Kind{ext.KindOfflineDownloadTool},
 	}
 }
 
-func (a *Aria2) Init() (string, error) {
-	a.client = nil
+func (*Tool) Init(ctx context.Context, host ext.Host) error { return nil }
+func (*Tool) Shutdown(ctx context.Context) error            { return nil }
+
+// --- ext.OfflineDownloadTool ---
+
+// Config reports the tool identity the offline_download_tool setting selects on.
+func (*Tool) Config() ext.OfflineDownloadToolConfig {
+	return ext.OfflineDownloadToolConfig{Name: ToolName}
+}
+
+// ensureClient returns a ready client, rebuilding it whenever aria2_uri /
+// aria2_secret change (or on first use). Building probes aria2.getVersion so a
+// down daemon surfaces a clear error here rather than deep in a call.
+func (t *Tool) ensureClient() (*Client, error) {
 	uri := setting.GetStr(conf.Aria2Uri)
 	secret := setting.GetStr(conf.Aria2Secret)
-	c, err := rpc.New(context.Background(), uri, secret, 4*time.Second, notify)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to init aria2 client")
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.client != nil && t.lastURI == uri && t.lastSecret == secret {
+		return t.client, nil
 	}
-	version, err := c.GetVersion()
-	if err != nil {
-		return "", errors.Wrapf(err, "failed get aria2 version")
+	c := New(uri, secret)
+	if _, err := c.GetVersion(); err != nil {
+		// Do not cache an unready client; the next call retries.
+		t.client = nil
+		return nil, fmt.Errorf("aria2 daemon not ready at %s: %w", uri, err)
 	}
-	a.client = c
-	log.Infof("using aria2 version: %s", version.Version)
-	return fmt.Sprintf("aria2 version: %s", version.Version), nil
+	t.client = c
+	t.lastURI = uri
+	t.lastSecret = secret
+	return t.client, nil
 }
 
-func (a *Aria2) IsReady() bool {
-	return a.client != nil
-}
-
-func (a *Aria2) AddURL(args *tool.AddUrlArgs) (string, error) {
-	options := map[string]interface{}{
-		"dir": args.TempDir,
-	}
-	gid, err := a.client.AddURI([]string{args.Url}, options)
+// AddURL hands aria2 the URL to fetch into args.TempDir (the "dir" option, so the
+// transfer engine finds the files there) and returns the daemon-side gid.
+func (t *Tool) AddURL(ctx context.Context, args ext.AddArgs) (string, error) {
+	c, err := t.ensureClient()
 	if err != nil {
 		return "", err
 	}
-	notify.Signals.Store(gid, args.Signal)
-	return gid, nil
+	return c.AddURI([]string{args.URL}, map[string]string{"dir": args.TempDir})
 }
 
-func (a *Aria2) Remove(task *tool.DownloadTask) error {
-	_, err := a.client.Remove(task.GID)
-	return err
-}
-
-func (a *Aria2) Status(task *tool.DownloadTask) (*tool.Status, error) {
-	info, err := a.client.TellStatus(task.GID)
+// Status maps aria2.tellStatus onto ext.ToolStatus: TotalBytes/Progress from the
+// length strings (div-by-zero guarded to 0), NewGID from FollowedBy[0] (aria2
+// promoting a metadata download to the real file/torrent), Completed on
+// status=="complete", and Err carrying the daemon-side message on status=="error".
+func (t *Tool) Status(ctx context.Context, gid string) (ext.ToolStatus, error) {
+	c, err := t.ensureClient()
 	if err != nil {
-		return nil, err
+		return ext.ToolStatus{}, err
 	}
-	total, err := strconv.ParseInt(info.TotalLength, 10, 64)
+	info, err := c.TellStatus(gid)
 	if err != nil {
-		total = 0
+		return ext.ToolStatus{}, err
 	}
-	downloaded, err := strconv.ParseUint(info.CompletedLength, 10, 64)
-	if err != nil {
-		downloaded = 0
+	total, _ := strconv.ParseInt(info.TotalLength, 10, 64)
+	completed, _ := strconv.ParseInt(info.CompletedLength, 10, 64)
+	var progress float64
+	if total > 0 {
+		progress = float64(completed) / float64(total) * 100
 	}
-	s := &tool.Status{
-		Completed:  info.Status == "complete",
-		Err:        err,
+	st := ext.ToolStatus{
 		TotalBytes: total,
+		Progress:   progress,
+		Status:     info.Status,
+		Completed:  info.Status == "complete",
 	}
-	s.Progress = float64(downloaded) / float64(total) * 100
-	if len(info.FollowedBy) != 0 {
-		s.NewGID = info.FollowedBy[0]
-		notify.Signals.Delete(task.GID)
-		notify.Signals.Store(s.NewGID, task.Signal)
+	if len(info.FollowedBy) > 0 {
+		st.NewGID = info.FollowedBy[0]
 	}
-	switch info.Status {
-	case "complete":
-		s.Completed = true
-	case "error":
-		s.Err = errors.Errorf("failed to download %s, error: %s", task.GID, info.ErrorMessage)
-	case "active":
-		s.Status = "aria2: " + info.Status
-		if info.Seeder == "true" {
-			s.Completed = true
-		}
-	case "waiting", "paused":
-		s.Status = "aria2: " + info.Status
-	case "removed":
-		s.Err = errors.Errorf("failed to download %s, removed", task.GID)
-	default:
-		return nil, errors.Errorf("[aria2] unknown status %s", info.Status)
+	if info.Status == "error" {
+		st.Err = info.ErrorMessage
 	}
-	return s, nil
+	return st, nil
 }
 
-var _ tool.Tool = (*Aria2)(nil)
-
-func init() {
-	tool.Tools.Add(&Aria2{})
+// Remove stops the download and clears its record, both of which are
+// NON-file-deleting on aria2's side — the downloaded temp files MUST survive
+// because the async transfer still needs them. It calls aria2.remove (stops the
+// download) then best-effort aria2.removeDownloadResult (clears the completed/
+// error record). It deliberately never calls any purge/force-remove/deleteFiles
+// variant. An error is returned only when BOTH calls fail (a down daemon); if
+// either succeeds the removal is considered done.
+func (t *Tool) Remove(ctx context.Context, gid string) error {
+	c, err := t.ensureClient()
+	if err != nil {
+		return err
+	}
+	removeErr := c.Remove(gid)
+	resultErr := c.RemoveDownloadResult(gid)
+	if removeErr != nil && resultErr != nil {
+		return removeErr
+	}
+	return nil
 }

@@ -1,0 +1,345 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// Reuses ObjRef/Obj/ListArgs/LinkArgs/ListReply/ObjReply/LinkReply/ErrorReply/
+// ErrorProto/HeaderValue/Empty/ManifestReply from the driver protocol.
+import "driver.proto";
+
+// HostService is the REVERSE bridge (F0): it is served by the HOST and dialed
+// by a plugin subprocess over go-plugin's GRPCBroker, so a plugin can borrow
+// core capabilities (FS/Store/HTTP) instead of touching storage/db/network
+// directly (design v4-plugin-extensions-design.md §0, §3).
+//
+// SECURITY ANCHOR: the identity of the CALLING PLUGIN is NOT carried in any
+// request on this service. The host constructs one HostService server instance
+// per plugin subprocess, bound to that plugin's id + Grant + restricted
+// principal; every handler closes over those. A plugin therefore cannot spoof
+// which plugin it is, cannot address another plugin's Store namespace, and
+// cannot widen its own network allowlist — those are server-side facts, not
+// wire inputs. `principal` fields below are host-issued opaque handles (empty =
+// the plugin's own bound principal); FS still runs core Authorize on every call
+// regardless of what the plugin passes.
+service HostService {
+  // --- FS: every op runs core Authorize against the acting principal ---
+  rpc FSResolve(FSResolveRequest) returns (FSResolveReply);
+  rpc FSList(FSListRequest) returns (ListReply);
+  rpc FSGet(FSGetRequest) returns (ObjReply);
+  rpc FSLink(FSLinkRequest) returns (LinkReply);
+  rpc FSMkdir(FSMkdirRequest) returns (ObjReply);
+  rpc FSMove(FSMoveRequest) returns (ErrorReply);
+  rpc FSRename(FSRenameRequest) returns (ErrorReply);
+  rpc FSCopy(FSCopyRequest) returns (ErrorReply);
+  rpc FSRemove(FSRemoveRequest) returns (ErrorReply);
+
+  // --- Store: KV namespaced by the caller plugin's id (server-side) ---
+  rpc StoreGet(StoreGetRequest) returns (StoreGetReply);
+  rpc StoreSet(StoreSetRequest) returns (ErrorReply);
+  rpc StoreDelete(StoreDeleteRequest) returns (ErrorReply);
+  rpc StoreList(StoreListRequest) returns (StoreListReply);
+
+  // --- Secrets: same shape/namespacing as Store, but the host encrypts
+  // values at rest (AES-256-GCM) before they touch disk. Mirrors StoreGet/
+  // StoreSet/StoreDelete/StoreList exactly; only the message names differ. ---
+  rpc SecretGet(SecretGetRequest) returns (SecretGetReply);
+  rpc SecretSet(SecretSetRequest) returns (ErrorReply);
+  rpc SecretDelete(SecretDeleteRequest) returns (ErrorReply);
+  rpc SecretList(SecretListRequest) returns (SecretListReply);
+
+  // --- Table: per-plugin schemaless document tables (JSON rows, PK-addressed)
+  // over the SAME backend as Store — a structured view over KV's storage
+  // extent (unlike Secrets, which is fully disjoint). Namespaced by plugin id
+  // (server-side) and by table name (a "table:<name>:" key prefix); gated by
+  // the same CapStore capability as Store/Secrets. ---
+  rpc TableInsert(TableInsertRequest) returns (TableInsertReply);
+  rpc TableGet(TableGetRequest) returns (TableGetReply);
+  rpc TableUpdate(TableUpdateRequest) returns (ErrorReply);
+  rpc TableDelete(TableDeleteRequest) returns (ErrorReply);
+  rpc TableList(TableListRequest) returns (TableListReply);
+
+  // --- HTTP: outbound gated by global allowlist ∩ Grant.Network ---
+  rpc HTTPDo(HTTPDoRequest) returns (HTTPDoReply);
+
+  // LoadConfig returns the calling plugin's persisted config_form value JSON
+  // (server-side bound to the plugin this HostService instance was built for).
+  rpc LoadConfig(LoadConfigRequest) returns (LoadConfigReply);
+  // SaveConfig persists the calling plugin's own config_form value JSON
+  // (server-side bound to the plugin this HostService instance was built for).
+  // Mirrors LoadConfig's leg exactly, in the write direction.
+  rpc SaveConfig(SaveConfigRequest) returns (SaveConfigReply);
+  // Capabilities returns the names of the Host APIs the calling plugin was
+  // granted (introspection over its own Grant.HostAPIs) — server-side bound,
+  // never a wire input.
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesReply);
+
+  // --- Auth: credential/token -> Principal (gated by CapAuth) ---
+  rpc AuthLogin(AuthLoginRequest) returns (PrincipalReply);
+  rpc AuthVerifyToken(AuthVerifyTokenRequest) returns (PrincipalReply);
+  rpc AuthVerifyAppPassword(AuthVerifyAppPasswordRequest) returns (PrincipalReply);
+
+  // --- Sign: mint/verify signed links (gated by CapSign) ---
+  rpc SignLink(SignLinkRequest) returns (SignLinkReply);
+  rpc SignVerifyLink(SignVerifyLinkRequest) returns (SignVerifyLinkReply);
+
+  // FSPut is the reverse-direction upload (the plugin already holds the
+  // bytes via its own ext.UploadStream, unlike the driver-side pull model in
+  // driver.proto's Put): the plugin pushes an Init frame then Chunk frames,
+  // the host lands them and calls FS().Put, returning the resulting Obj.
+  rpc FSPut(stream FSPutClient) returns (FSPutReply);
+}
+
+message FSResolveRequest {
+  string principal = 1;
+  string path = 2;
+}
+message FSResolveReply {
+  ObjRef ref = 1;
+  ErrorProto error = 2;
+}
+
+message FSListRequest {
+  string principal = 1;
+  ObjRef dir = 2;
+  ListArgs args = 3;
+}
+
+message FSGetRequest {
+  string principal = 1;
+  ObjRef ref = 2;
+}
+
+message FSLinkRequest {
+  string principal = 1;
+  ObjRef ref = 2;
+  LinkArgs args = 3;
+}
+
+message FSMkdirRequest {
+  string principal = 1;
+  ObjRef parent = 2;
+  string name = 3;
+}
+
+message FSMoveRequest {
+  string principal = 1;
+  ObjRef src = 2;
+  ObjRef dst_dir = 3;
+}
+
+message FSRenameRequest {
+  string principal = 1;
+  ObjRef src = 2;
+  string new_name = 3;
+}
+
+message FSCopyRequest {
+  string principal = 1;
+  ObjRef src = 2;
+  ObjRef dst_dir = 3;
+}
+
+message FSRemoveRequest {
+  string principal = 1;
+  ObjRef ref = 2;
+}
+
+message StoreGetRequest { string key = 1; }
+message StoreGetReply {
+  bytes value = 1;
+  bool found = 2;
+  ErrorProto error = 3;
+}
+message StoreSetRequest {
+  string key = 1;
+  bytes value = 2;
+}
+message StoreDeleteRequest { string key = 1; }
+message StoreListRequest { string prefix = 1; }
+message StoreListReply {
+  repeated string keys = 1;
+  ErrorProto error = 2;
+}
+
+message SecretGetRequest { string key = 1; }
+message SecretGetReply {
+  bytes value = 1;
+  bool found = 2;
+  ErrorProto error = 3;
+}
+message SecretSetRequest {
+  string key = 1;
+  bytes value = 2;
+}
+message SecretDeleteRequest { string key = 1; }
+message SecretListRequest { string prefix = 1; }
+message SecretListReply {
+  repeated string keys = 1;
+  ErrorProto error = 2;
+}
+
+// --- Table ---
+
+message TableInsertRequest {
+  string table = 1;
+  bytes row = 2; // JSON-encoded row
+}
+message TableInsertReply {
+  string id = 1; // host-assigned primary key
+  ErrorProto error = 2;
+}
+
+message TableGetRequest {
+  string table = 1;
+  string id = 2;
+}
+message TableGetReply {
+  bytes row = 1; // JSON-encoded row
+  bool found = 2;
+  ErrorProto error = 3;
+}
+
+message TableUpdateRequest {
+  string table = 1;
+  string id = 2;
+  bytes row = 3; // JSON-encoded replacement row
+}
+
+message TableDeleteRequest {
+  string table = 1;
+  string id = 2;
+}
+
+message TableListRequest {
+  string table = 1;
+}
+// TableRowProto pairs a row's primary key with its JSON-encoded value.
+message TableRowProto {
+  string id = 1;
+  bytes row = 2;
+}
+message TableListReply {
+  repeated TableRowProto rows = 1;
+  ErrorProto error = 2;
+}
+
+message HTTPDoRequest {
+  string method = 1;
+  string url = 2;
+  map<string, HeaderValue> header = 3;
+  bytes body = 4;
+}
+message HTTPDoReply {
+  int32 status = 1;
+  map<string, HeaderValue> header = 2;
+  bytes body = 3;
+  ErrorProto error = 4;
+}
+
+message LoadConfigRequest {}
+message LoadConfigReply {
+  bytes config = 1;
+  ErrorProto error = 2;
+}
+
+message SaveConfigRequest {
+  bytes config = 1;
+}
+message SaveConfigReply {
+  ErrorProto error = 1;
+}
+
+message CapabilitiesRequest {}
+message CapabilitiesReply {
+  repeated string apis = 1;
+  ErrorProto error = 2;
+}
+
+// --- Auth ---
+
+message AuthLoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message AuthVerifyTokenRequest {
+  string token = 1;
+}
+
+message AuthVerifyAppPasswordRequest {
+  string username = 1;
+  string app_password = 2;
+}
+
+// PrincipalReply carries the opaque host-issued Principal handle minted by an
+// Auth call.
+message PrincipalReply {
+  string principal = 1;
+  ErrorProto error = 2;
+}
+
+// --- Sign ---
+
+message SignLinkRequest {
+  string principal = 1;
+  ObjRef ref = 2;
+  string scope = 3;
+  int64 ttl_ms = 4; // 0 means "no expiry" (mirrors ttl<=0 in ext.Signer.SignLink)
+}
+
+message SignLinkReply {
+  string token = 1;
+  ErrorProto error = 2;
+}
+
+message SignVerifyLinkRequest {
+  string token = 1;
+}
+
+message SignVerifyLinkReply {
+  ObjRef ref = 1;
+  string scope = 2;
+  ErrorProto error = 3;
+}
+
+// --- FS.Put (reverse upload) ---
+
+// FSPutClient: plugin -> host messages on the FSPut client-streaming call.
+message FSPutClient {
+  oneof msg {
+    FSPutInit init = 1;
+    Chunk chunk = 2;
+  }
+}
+
+message FSPutInit {
+  string principal = 1;
+  ObjRef dst_dir = 2;
+  UploadInfo info = 3;
+}
+
+message FSPutReply {
+  Obj obj = 1;
+  ErrorProto error = 2;
+}
+
+// HostCapProbeService is the F0 integration fixture: a PLUGIN-served service
+// whose only job is to exercise each borrowed Host capability over the reverse
+// bridge and report the outcome, so a real subprocess drives HostService end to
+// end. Exercise receives the host_broker_id to Dial back for HostService.
+service HostCapProbeService {
+  rpc GetManifest(Empty) returns (ManifestReply);
+  rpc Exercise(ExerciseRequest) returns (ExerciseReply);
+}
+
+message ExerciseRequest {
+  uint32 host_broker_id = 1; // Dial this broker id to reach HostService
+  string op = 2;             // e.g. "fs.list", "fs.mkdir", "store.set", "http.get"
+  string arg = 3;
+  string arg2 = 4;
+}
+message ExerciseReply {
+  string result = 1;
+  ErrorProto error = 2;
+}

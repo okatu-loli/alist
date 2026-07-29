@@ -130,6 +130,14 @@ Thanks goes to these wonderful people:
 
 [![Contributors](http://contrib.nn.ci/api?repo=alist-org/alist&repo=alist-org/alist-web&repo=alist-org/docs)](https://github.com/alist-org/alist/graphs/contributors)
 
+## 数据与隐私
+
+- **默认不主动联网**：没有你的操作，AList 不会自行连接任何外部服务器——不上报统计、不检查更新、不打点。这由一条 CI 测试持续看守：任何引入主动联网的改动都无法通过测试合入。
+- **界面资源本站提供**：logo、图标等默认由你的服务器直接提供。已知残留：当前前端构建仍会加载一个第三方文档预览脚本，将随 v4 前端更新移除。
+- **今后的规矩**：任何需要联网的新功能，必须默认关闭、有独立开关，并在发布说明中写明连接什么、发送什么、为什么。
+
+详见文档《数据与隐私》。
+
 ## License
 
 The `AList` is open-source software licensed under the AGPL-3.0 license.

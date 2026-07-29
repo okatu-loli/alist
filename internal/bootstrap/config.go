@@ -9,6 +9,7 @@ import (
 	"github.com/alist-org/alist/v3/cmd/flags"
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/internal/net"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/caarlos0/env/v9"
@@ -126,6 +127,14 @@ func CleanTempDir() {
 		log.Errorln("failed list temp file: ", err)
 	}
 	for _, file := range files {
+		// fs.UploadPersistTempDirName holds temp files backing resumable
+		// upload tasks recovered by InitTaskManager (which runs before this);
+		// wiping it here would yank the content out from under a task that's
+		// either already running or about to be scheduled. It's pruned
+		// separately by fs.ReconcileUploadPersistTempDir instead.
+		if file.Name() == fs.UploadPersistTempDirName {
+			continue
+		}
 		if err := os.RemoveAll(filepath.Join(conf.Conf.TempDir, file.Name())); err != nil {
 			log.Errorln("failed delete temp file: ", err)
 		}

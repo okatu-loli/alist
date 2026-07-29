@@ -42,18 +42,6 @@ func GetAllRoles() ([]model.Role, error) {
 	return roles, nil
 }
 
-func CreateRole(r *model.Role) error {
-	if err := db.Create(r).Error; err != nil {
-		return errors.WithStack(err)
-	}
-	if r.Default {
-		if err := db.Model(&model.Role{}).Where("id <> ?", r.ID).Update("default", false).Error; err != nil {
-			return errors.WithStack(err)
-		}
-	}
-	return nil
-}
-
 func UpdateRole(r *model.Role) error {
 	if err := db.Save(r).Error; err != nil {
 		return errors.WithStack(err)

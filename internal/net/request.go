@@ -190,10 +190,15 @@ func (d *downloader) download() (io.ReadCloser, error) {
 	d.concurrency = d.cfg.Concurrency
 	d.sendChunkTask(true)
 
-	var rc io.ReadCloser = NewMultiReadCloser(d.bufs[0], d.interrupt, d.finishBuf)
+	// d.bufs[0] and d.err are both mutated from the worker goroutine
+	// sendChunkTask(true) just spawned (it can append another buf via a
+	// second sendChunkTask call, or fail and setErr, before this line runs),
+	// so both reads must go through the same lock those mutations use --
+	// getBuf/getErr, not the bare fields.
+	var rc io.ReadCloser = NewMultiReadCloser(d.getBuf(0), d.interrupt, d.finishBuf)
 
 	// Return error
-	return rc, d.err
+	return rc, d.getErr()
 }
 
 func (d *downloader) sendChunkTask(newConcurrency bool) error {
@@ -218,7 +223,10 @@ func (d *downloader) sendChunkTask(newConcurrency bool) error {
 		buf = NewBuf(d.ctx, d.cfg.PartSize)
 		d.bufs = append(d.bufs, buf)
 	} else {
-		buf = d.getBuf(d.nextChunk)
+		// d.m is already held here (see the Lock at the top of this
+		// function), so this must use the unlocked helper, not getBuf
+		// (which takes d.m itself and would deadlock re-entering it).
+		buf = d.getBufLocked(d.nextChunk)
 	}
 
 	if d.pos < d.maxPos {
@@ -261,28 +269,79 @@ func (d *downloader) sendChunkTask(newConcurrency bool) error {
 
 // when the final reader Close, we interrupt
 func (d *downloader) interrupt() error {
-	if d.written != d.params.Range.Length {
+	if d.getWritten() != d.params.Range.Length {
 		log.Debugf("Downloader interrupt before finish")
 		if d.getErr() == nil {
 			d.setErr(fmt.Errorf("interrupted"))
 		}
 	}
-	d.cancel(d.err)
+	err := d.getErr()
+	d.cancel(err)
 	defer func() {
 		close(d.chunkChannel)
-		for _, buf := range d.bufs {
-			buf.Close()
-		}
+		// bufs/concurrency are both mutated under d.m from sendChunkTask
+		// (and, for concurrency, from tryDownloadChunk's cancel-concurrency
+		// branch) by worker goroutines that may still be finishing up when
+		// the reader closes and this deferred cleanup runs; snapshot both
+		// under the same lock instead of reading the bare fields.
+		d.m.Lock()
+		bufs := d.bufs
 		if d.concurrency > 0 {
 			d.concurrency = -d.concurrency
 		}
-		log.Debugf("maxConcurrency:%d", d.cfg.Concurrency+d.concurrency)
+		concurrency := d.concurrency
+		d.m.Unlock()
+		for _, buf := range bufs {
+			buf.Close()
+		}
+		log.Debugf("maxConcurrency:%d", d.cfg.Concurrency+concurrency)
 	}()
-	return d.err
+	return err
 }
-func (d *downloader) getBuf(id int) (b *Buf) {
+
+// getBufLocked returns the buf for chunk id. The caller must already hold
+// d.m -- it exists so sendChunkTask (which takes d.m at its own entry) can
+// look up a buf without recursively locking a non-reentrant mutex. External
+// callers must use getBuf instead.
+func (d *downloader) getBufLocked(id int) *Buf {
 	return d.bufs[id%len(d.bufs)]
 }
+
+// getBuf is the synchronized entry point for callers that don't already
+// hold d.m (download's initial bufs[0] lookup, finishBuf). d.bufs is
+// appended to under d.m by sendChunkTask -- called from multiple worker
+// goroutines -- so indexing into it without the lock is a data race (this is
+// what -race caught in TestDownloadOrder: a sendChunkTask append racing
+// download()'s old unguarded d.bufs[0] read).
+func (d *downloader) getBuf(id int) (b *Buf) {
+	d.m.Lock()
+	defer d.m.Unlock()
+	return d.getBufLocked(id)
+}
+
+// getWritten is a thread-safe getter for written, mirroring getErr/setErr.
+func (d *downloader) getWritten() int64 {
+	d.m.Lock()
+	defer d.m.Unlock()
+	return d.written
+}
+
+// setReadingID/getReadingID synchronize readingID: finishBuf (the reader's
+// goroutine, via MultiReadCloser.Read) writes it while tryDownloadChunk (a
+// worker goroutine) reads it concurrently to decide whether the chunk
+// currently being read gets priority on retry.
+func (d *downloader) setReadingID(id int) {
+	d.m.Lock()
+	d.readingID = id
+	d.m.Unlock()
+}
+
+func (d *downloader) getReadingID() int {
+	d.m.Lock()
+	defer d.m.Unlock()
+	return d.readingID
+}
+
 func (d *downloader) finishBuf(id int) (isLast bool, nextBuf *Buf) {
 	id++
 	if id >= d.maxPart {
@@ -291,7 +350,7 @@ func (d *downloader) finishBuf(id int) (isLast bool, nextBuf *Buf) {
 
 	d.sendChunkTask(false)
 
-	d.readingID = id
+	d.setReadingID(id)
 	return false, d.getBuf(id)
 }
 
@@ -417,7 +476,7 @@ func (d *downloader) tryDownloadChunk(params *HttpRequestParams, ch *chunk) (int
 			return 0, errCancelConcurrency
 		}
 		d.m.Unlock()
-		if ch.id != d.readingID { //正在被读取的优先重试
+		if ch.id != d.getReadingID() { //正在被读取的优先重试
 			d.m2.Lock()
 			defer d.m2.Unlock()
 			<-time.After(time.Millisecond * 200)

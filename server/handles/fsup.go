@@ -1,6 +1,7 @@
 package handles
 
 import (
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 	"io"
 	"net/url"
 	stdpath "path"
@@ -27,6 +28,28 @@ func getLastModified(c *gin.Context) time.Time {
 	return lastModified
 }
 
+// FsStream uploads a file by streaming the raw request body directly (no multipart encoding).
+// @Summary Upload file (raw stream)
+// @Description Runs behind middlewares.FsUp and the upload rate limiter. The destination path is joined with the caller's base path. If As-Task is true, the upload is queued as a background task instead of completing synchronously.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Accept application/octet-stream
+// @Produce json
+// @Param File-Path header string true "URL-escaped destination path, joined with the caller's base path"
+// @Param Content-Length header int true "size in bytes of the uploaded content"
+// @Param Last-Modified header int false "modification time in Unix milliseconds; defaults to now if absent/invalid"
+// @Param As-Task header bool false "if \"true\", queue the upload as a background task"
+// @Param Overwrite header bool false "if \"false\", reject the upload when the destination already exists (default: allow overwrite)"
+// @Param Content-Type header string false "MIME type of the uploaded content; guessed from the file name if absent"
+// @Param X-File-Md5 header string false "expected MD5 hash of the content"
+// @Param X-File-Sha1 header string false "expected SHA1 hash of the content"
+// @Param X-File-Sha256 header string false "expected SHA256 hash of the content"
+// @Success 200 {object} common.Resp[gin.H] "data: {} or {task: TaskInfo} when As-Task is true"
+// @Failure 400 {object} common.Resp[any] "bad File-Path or Content-Length"
+// @Failure 403 {object} common.Resp[any] "no permission or file exists"
+// @Failure 500 {object} common.Resp[any]
+// @Router /fs/put [put]
+// @Router /v4/fs/put [put]
 func FsStream(c *gin.Context) {
 	path := c.GetHeader("File-Path")
 	path, err := url.PathUnescape(path)
@@ -36,7 +59,7 @@ func FsStream(c *gin.Context) {
 	}
 	asTask := c.GetHeader("As-Task") == "true"
 	overwrite := c.GetHeader("Overwrite") != "false"
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	path, err = user.JoinPath(path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
@@ -45,7 +68,7 @@ func FsStream(c *gin.Context) {
 	if !overwrite {
 		if res, _ := fs.Get(c, path, &fs.GetArgs{NoLog: true}); res != nil {
 			_, _ = utils.CopyWithBuffer(io.Discard, c.Request.Body)
-			common.ErrorStrResp(c, "file exists", 403)
+			common.ErrorI18n(c, "fsmanage.file_exists", 403, "name", stdpath.Base(path))
 			return
 		}
 	}
@@ -100,10 +123,32 @@ func FsStream(c *gin.Context) {
 		return
 	}
 	common.SuccessResp(c, gin.H{
-		"task": getTaskInfo(t),
+		"task": getTaskInfo(c, t),
 	})
 }
 
+// FsForm uploads a file via multipart/form-data.
+// @Summary Upload file (multipart form)
+// @Description Runs behind middlewares.FsUp and the upload rate limiter. The destination path is joined with the caller's base path. Rejected if the target storage has NoUpload set. If As-Task is true, the upload is queued as a background task instead of completing synchronously.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Accept multipart/form-data
+// @Produce json
+// @Param File-Path header string true "URL-escaped destination path, joined with the caller's base path"
+// @Param Last-Modified header int false "modification time in Unix milliseconds; defaults to now if absent/invalid"
+// @Param As-Task header bool false "if \"true\", queue the upload as a background task"
+// @Param Overwrite header bool false "if \"false\", reject the upload when the destination already exists (default: allow overwrite)"
+// @Param X-File-Md5 header string false "expected MD5 hash of the content"
+// @Param X-File-Sha1 header string false "expected SHA1 hash of the content"
+// @Param X-File-Sha256 header string false "expected SHA256 hash of the content"
+// @Param file formData file true "file content"
+// @Success 200 {object} common.Resp[gin.H] "data: {} or {task: TaskInfo} when As-Task is true"
+// @Failure 400 {object} common.Resp[any] "bad File-Path or storage lookup failure"
+// @Failure 403 {object} common.Resp[any] "no permission or file exists"
+// @Failure 405 {object} common.Resp[any] "storage does not support upload"
+// @Failure 500 {object} common.Resp[any]
+// @Router /fs/form [put]
+// @Router /v4/fs/form [put]
 func FsForm(c *gin.Context) {
 	path := c.GetHeader("File-Path")
 	path, err := url.PathUnescape(path)
@@ -113,7 +158,7 @@ func FsForm(c *gin.Context) {
 	}
 	asTask := c.GetHeader("As-Task") == "true"
 	overwrite := c.GetHeader("Overwrite") != "false"
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	path, err = user.JoinPath(path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
@@ -122,7 +167,7 @@ func FsForm(c *gin.Context) {
 	if !overwrite {
 		if res, _ := fs.Get(c, path, &fs.GetArgs{NoLog: true}); res != nil {
 			_, _ = utils.CopyWithBuffer(io.Discard, c.Request.Body)
-			common.ErrorStrResp(c, "file exists", 403)
+			common.ErrorI18n(c, "fsmanage.file_exists", 403, "name", stdpath.Base(path))
 			return
 		}
 	}
@@ -132,7 +177,7 @@ func FsForm(c *gin.Context) {
 		return
 	}
 	if storage.Config().NoUpload {
-		common.ErrorStrResp(c, "Current storage doesn't support upload", 405)
+		common.ErrorI18n(c, "errs.upload_not_supported", 405)
 		return
 	}
 	file, err := c.FormFile("file")
@@ -190,6 +235,6 @@ func FsForm(c *gin.Context) {
 		return
 	}
 	common.SuccessResp(c, gin.H{
-		"task": getTaskInfo(t),
+		"task": getTaskInfo(c, t),
 	})
 }

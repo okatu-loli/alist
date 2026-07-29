@@ -12,14 +12,49 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Ping is a liveness check that always replies "pong".
+// @Summary Ping
+// @Description Liveness check; always replies "pong". Mounted at the top-level route (not under /api).
+// @Tags public
+// @Produce plain
+// @Success 200 {string} string "pong"
+// @Router /../ping [get]
+func Ping(c *gin.Context) {
+	c.String(200, "pong")
+}
+
+// Favicon redirects to the configured favicon URL.
+// @Summary Favicon
+// @Description Redirects to the site's configured favicon URL. Mounted at the top-level route (not under /api).
+// @Tags public
+// @Produce json
+// @Success 302 {string} string "redirect to the favicon URL"
+// @Router /../favicon.ico [get]
 func Favicon(c *gin.Context) {
 	c.Redirect(302, setting.GetStr(conf.Favicon))
 }
 
+// Robots returns the site's robots.txt content.
+// @Summary robots.txt
+// @Description Returns the configured robots.txt content. Mounted at the top-level route (not under /api).
+// @Tags public
+// @Produce plain
+// @Success 200 {string} string "robots.txt content"
+// @Router /../robots.txt [get]
 func Robots(c *gin.Context) {
 	c.String(200, setting.GetStr(conf.RobotsTxt))
 }
 
+// Plist decodes a base64-encoded signed link and serves an iOS OTA-install
+// manifest (.plist) pointing at it.
+// @Summary iOS OTA install manifest
+// @Description Decodes the base64-encoded `{link}/{name}` payload in link_name and returns an Apple OTA-install .plist manifest referencing it. Mounted at the top-level route (not under /api).
+// @Tags public
+// @Produce xml
+// @Param link_name path string true "base64-encoded \"link/name\" payload, with optional .plist suffix"
+// @Success 200 {string} string "application/xml plist manifest"
+// @Failure 400 {object} common.Resp[any] "malformed link_name"
+// @Router /../i/{link_name} [get]
 func Plist(c *gin.Context) {
 	linkNameB64 := strings.TrimSuffix(c.Param("link_name"), ".plist")
 	linkName, err := utils.SafeAtob(linkNameB64)
@@ -29,7 +64,7 @@ func Plist(c *gin.Context) {
 	}
 	linkNameSplit := strings.Split(linkName, "/")
 	if len(linkNameSplit) != 2 {
-		common.ErrorStrResp(c, "malformed link", 400)
+		common.ErrorI18n(c, "plist.malformed_link", 400)
 		return
 	}
 	linkEncode := linkNameSplit[0]

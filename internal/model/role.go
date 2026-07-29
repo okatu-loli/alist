@@ -18,6 +18,9 @@ type Role struct {
 	Name        string `json:"name" gorm:"unique" binding:"required"`
 	Description string `json:"description"`
 	Default     bool   `json:"default" gorm:"default:false"`
+	// Protected marks built-in roles (admin/guest and future presets) that the
+	// role API must refuse to rename or delete.
+	Protected bool `json:"protected" gorm:"default:false"`
 	// PermissionScopes stores structured permission list and is ignored by gorm.
 	PermissionScopes []PermissionEntry `json:"permission_scopes" gorm:"-"`
 	// RawPermission is the JSON representation of PermissionScopes stored in DB.

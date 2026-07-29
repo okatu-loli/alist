@@ -2,9 +2,10 @@ package fs
 
 import (
 	"context"
-	log "github.com/sirupsen/logrus"
-	"io"
 
+	log "github.com/sirupsen/logrus"
+
+	ext "github.com/AlistGo/alist-ext"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
@@ -61,20 +62,38 @@ func MakeDir(ctx context.Context, path string, lazyCache ...bool) error {
 	err := makeDir(ctx, path, lazyCache...)
 	if err != nil {
 		log.Errorf("failed make dir %s: %+v", path, err)
+		return err
 	}
-	return err
+	emitFSEvent(ctx, ext.EventFSMkdir, path, "")
+	return nil
 }
 
 func Move(ctx context.Context, srcPath, dstDirPath string, lazyCache ...bool) error {
 	err := move(ctx, srcPath, dstDirPath, lazyCache...)
 	if err != nil {
 		log.Errorf("failed move %s to %s: %+v", srcPath, dstDirPath, err)
+		return err
 	}
-	return err
+	emitFSEvent(ctx, ext.EventFSMove, srcPath, dstDirPath)
+	return nil
 }
 
-func Copy(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool) (task.TaskExtensionInfo, error) {
-	res, err := _copy(ctx, srcObjPath, dstDirPath, lazyCache...)
+// MoveAsTask always queues a background MoveTask (move only supports moving
+// within a single storage, so there's no synchronous same-storage shortcut).
+// detachPerms carries the perm_policy=detach option down to the task.
+func MoveAsTask(ctx context.Context, srcPath, dstDirPath string, detachPerms bool) (task.TaskExtensionInfo, error) {
+	t, err := moveAsTask(ctx, srcPath, dstDirPath, detachPerms)
+	if err != nil {
+		log.Errorf("failed move %s to %s: %+v", srcPath, dstDirPath, err)
+	}
+	return t, err
+}
+
+// Copy copies srcObjPath into dstDirPath. clonePerms carries the copy_perms
+// option: when true, the source subtree's manual permissions (with their role
+// bindings) are cloned onto the destination after the copy succeeds.
+func Copy(ctx context.Context, srcObjPath, dstDirPath string, clonePerms bool, lazyCache ...bool) (task.TaskExtensionInfo, error) {
+	res, err := _copy(ctx, srcObjPath, dstDirPath, clonePerms, lazyCache...)
 	if err != nil {
 		log.Errorf("failed copy %s to %s: %+v", srcObjPath, dstDirPath, err)
 	}
@@ -85,24 +104,30 @@ func Rename(ctx context.Context, srcPath, dstName string, lazyCache ...bool) err
 	err := rename(ctx, srcPath, dstName, lazyCache...)
 	if err != nil {
 		log.Errorf("failed rename %s to %s: %+v", srcPath, dstName, err)
+		return err
 	}
-	return err
+	emitFSEvent(ctx, ext.EventFSRename, srcPath, dstName)
+	return nil
 }
 
 func Remove(ctx context.Context, path string) error {
 	err := remove(ctx, path)
 	if err != nil {
 		log.Errorf("failed remove %s: %+v", path, err)
+		return err
 	}
-	return err
+	emitFSEvent(ctx, ext.EventFSRemove, path, "")
+	return nil
 }
 
 func PutDirectly(ctx context.Context, dstDirPath string, file model.FileStreamer, lazyCache ...bool) error {
 	err := putDirectly(ctx, dstDirPath, file, lazyCache...)
 	if err != nil {
 		log.Errorf("failed put %s: %+v", dstDirPath, err)
+		return err
 	}
-	return err
+	emitFSEvent(ctx, ext.EventFSPut, dstDirPath, "")
+	return nil
 }
 
 func PutAsTask(ctx context.Context, dstDirPath string, file model.FileStreamer) (task.TaskExtensionInfo, error) {
@@ -111,46 +136,6 @@ func PutAsTask(ctx context.Context, dstDirPath string, file model.FileStreamer) 
 		log.Errorf("failed put %s: %+v", dstDirPath, err)
 	}
 	return t, err
-}
-
-func ArchiveMeta(ctx context.Context, path string, args model.ArchiveMetaArgs) (*model.ArchiveMetaProvider, error) {
-	meta, err := archiveMeta(ctx, path, args)
-	if err != nil {
-		log.Errorf("failed get archive meta %s: %+v", path, err)
-	}
-	return meta, err
-}
-
-func ArchiveList(ctx context.Context, path string, args model.ArchiveListArgs) ([]model.Obj, error) {
-	objs, err := archiveList(ctx, path, args)
-	if err != nil {
-		log.Errorf("failed list archive [%s]%s: %+v", path, args.InnerPath, err)
-	}
-	return objs, err
-}
-
-func ArchiveDecompress(ctx context.Context, srcObjPath, dstDirPath string, args model.ArchiveDecompressArgs, lazyCache ...bool) (task.TaskExtensionInfo, error) {
-	t, err := archiveDecompress(ctx, srcObjPath, dstDirPath, args, lazyCache...)
-	if err != nil {
-		log.Errorf("failed decompress [%s]%s: %+v", srcObjPath, args.InnerPath, err)
-	}
-	return t, err
-}
-
-func ArchiveDriverExtract(ctx context.Context, path string, args model.ArchiveInnerArgs) (*model.Link, model.Obj, error) {
-	l, obj, err := archiveDriverExtract(ctx, path, args)
-	if err != nil {
-		log.Errorf("failed extract [%s]%s: %+v", path, args.InnerPath, err)
-	}
-	return l, obj, err
-}
-
-func ArchiveInternalExtract(ctx context.Context, path string, args model.ArchiveInnerArgs) (io.ReadCloser, int64, error) {
-	l, obj, err := archiveInternalExtract(ctx, path, args)
-	if err != nil {
-		log.Errorf("failed extract [%s]%s: %+v", path, args.InnerPath, err)
-	}
-	return l, obj, err
 }
 
 type GetStoragesArgs struct {

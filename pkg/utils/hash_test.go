@@ -32,6 +32,26 @@ var hashTestSet = []hashTest{
 	},
 }
 
+func TestGetHashByName(t *testing.T) {
+	if got := GetHashByName("md5"); got != MD5 {
+		t.Errorf("GetHashByName(%q) = %v, want %v", "md5", got, MD5)
+	}
+	if got := GetHashByName("sha1"); got != SHA1 {
+		t.Errorf("GetHashByName(%q) = %v, want %v", "sha1", got, SHA1)
+	}
+	if got := GetHashByName("sha256"); got != SHA256 {
+		t.Errorf("GetHashByName(%q) = %v, want %v", "sha256", got, SHA256)
+	}
+	if got := GetHashByName("not-a-registered-hash"); got != nil {
+		t.Errorf("GetHashByName of an unregistered name = %v, want nil", got)
+	}
+	// The alias ("MD5") is a distinct lookup table (alias2hash); GetHashByName
+	// only resolves the wire/registration name.
+	if got := GetHashByName("MD5"); got != nil {
+		t.Errorf("GetHashByName(%q) = %v, want nil (alias is not a name)", "MD5", got)
+	}
+}
+
 func TestMultiHasher(t *testing.T) {
 	for _, test := range hashTestSet {
 		mh := NewMultiHasher([]*HashType{MD5, SHA1, SHA256})

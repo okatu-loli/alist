@@ -2,8 +2,9 @@ package _123Open
 
 import (
 	"fmt"
-	"github.com/alist-org/alist/v3/pkg/utils"
 	"time"
+
+	"github.com/alist-org/alist/v3/pkg/utils"
 )
 
 type File struct {

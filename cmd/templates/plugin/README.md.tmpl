@@ -1,0 +1,58 @@
+# {{.Name}}
+
+An `ext.StorageDriver` plugin scaffolded by `alist plugin new`. Fill in
+`driver.go`'s `List`/`Link`/`Get` (and any other capabilities you declare)
+with real logic against your storage backend, then keep `plugin.json` and
+`i18n/*.json` in sync — see below.
+
+## Layout
+
+- `driver.go` — the driver: `Manifest()` (kept equivalent to `plugin.json`)
+  and the `ext.StorageDriver` methods
+- `main.go` — `grpcplugin.Serve(...)`, the gRPC plugin entrypoint
+- `plugin.json` — the manifest, generated from the same data as
+  `Manifest()`; keep them in sync (hand-edit both, or regenerate a scratch
+  copy with `alist plugin new` and diff)
+- `i18n/en.json`, `i18n/zh-CN.json` — bundled translations for the
+  `Info.Additional` config fields (`field.<name>.label` / `field.<name>.help`
+  keys); run `alist plugin i18n --dir .` after adding/renaming fields
+- `pack.sh` / `serve.sh` — build, sign, package, and locally serve the plugin
+- `go.mod` — module `{{.Module}}`{{if .ExtPath}}, with a local `replace` to
+  the alist-ext SDK checkout at `{{.ExtPath}}` (only needed while iterating
+  on unreleased local SDK changes — drop the replace to build against the
+  tagged `github.com/AlistGo/alist-ext` release){{else}}, requiring the
+  published `github.com/AlistGo/alist-ext {{.ExtRequire}}` module; if you
+  need to develop against unreleased local SDK changes instead, add
+  `replace github.com/AlistGo/alist-ext => /path/to/alist/ext` to `go.mod`
+  yourself, or re-run `alist plugin new` with `--ext-path
+  /path/to/alist/ext`{{end}}
+
+## Build
+
+```bash
+go build -o dist/plugin .
+```
+
+## Package + sign + serve
+
+```bash
+./pack.sh          # build, genkey, sign, pack -> dist/{{.Slug}}-{{.Version}}.tar.gz + dist/index.json
+./serve.sh &        # serve dist/ at http://127.0.0.1:8767/
+```
+
+`pack.sh` shells out to the hidden `alist plugin genkey|sign|pack` commands
+(override the binary with `ALIST_BIN=...` if `alist` isn't on `PATH`). Import
+`http://127.0.0.1:8767/index.json` as a plugin source, trust
+`dist/pubkey.hex`, then install `{{.ID}}` through the usual extension install
+gateway.
+
+## i18n
+
+Config-form field translations live in `i18n/<lang>.json`
+(`field.<name>.label` / `field.<name>.help`). After editing
+`Info.Additional` in `driver.go`, run:
+
+```bash
+alist plugin i18n --dir .            # fills in missing keys, keeps existing translations
+alist plugin i18n --dir . --check    # CI: exits non-zero if any key is missing
+```

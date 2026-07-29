@@ -2,6 +2,13 @@
 .DS_Store
 output/
 /dist/
+# goreleaser release pipeline: pre-built archives staged for
+# release.extra_files/checksum.extra_files, and the scratch dir used to
+# rename cross-compiled binaries to `alist`/`alist.exe` before archiving.
+# (release-pkg/, not pkg/ — this repo already has a real ./pkg Go package
+# tree at the root.)
+/dist-release/
+/release-pkg/
 
 # Binaries for programs and plugins
 *.exe
@@ -22,6 +29,11 @@ output/
 # vendor/
 /bin/*
 *.json
+!internal/i18n/locales/*.json
+!tools/demo-plugin/plugin.json
+!tools/demo-plugin/plugin.v2.json
+!tools/123open-plugin/plugin.json
+!tools/123open-plugin/i18n/*.json
 /build
 /data/
 /tmp/
@@ -29,6 +41,33 @@ output/
 /lang/
 /daemon/
 /public/dist/*
-/!public/dist/README.md
+!/public/dist/README.md
+!/public/dist/images/
+/public/dist/images/*
+!/public/dist/images/logo.svg
 
 .VSCodeCounter
+/alist
+/data1/
+
+# demo-plugin build output and any local signing keys (never commit private keys)
+/tools/demo-plugin/dist/
+/tools/demo-plugin/*.ed25519
+
+# 123open-plugin build output and any local signing keys (never commit private keys)
+/tools/123open-plugin/dist/
+/tools/123open-plugin/*.ed25519
+
+# frp-plugin build output and any local signing keys (never commit private keys)
+/tools/frp-plugin/dist/
+/tools/frp-plugin/*.ed25519
+# stray root build artifact from `go build ./tools/frp-plugin` without -o
+/frp-plugin
+
+# G4: the shared secrets key (internal/crypto.SecretsKeyFile) encrypting
+# storage Addition / plugin config_form secrets at rest, plus its
+# pre-restore-<ts> backup copies (internal/backup) — never commit key
+# material, and *.json's whitelist above wouldn't have caught this filename
+# anyway (Minor 5, G4 red team).
+**/.secrets.key
+**/pre-restore-*.secrets.key

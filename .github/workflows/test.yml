@@ -1,0 +1,136 @@
+name: test
+
+on:
+  push:
+    branches: ["main", "v4/**"]
+  pull_request:
+
+jobs:
+  test:
+    name: go test (sqlite + mysql + postgres)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: alist_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -proot"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: alist_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_MYSQL_DSN: "root:root@tcp(127.0.0.1:3306)/alist_test?charset=utf8mb4&parseTime=True&loc=Local"
+      TEST_PG_DSN: "host=127.0.0.1 user=postgres password=postgres dbname=alist_test port=5432 sslmode=disable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            ext/go.sum
+            agent/go.sum
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      # Step 13 gate: every route keeps its swaggo annotations — swag must
+      # regenerate the OpenAPI document without errors. The generated files
+      # are gitignored, so "generates cleanly" is the drift-free criterion.
+      - name: swagger generates cleanly
+        run: |
+          go run github.com/swaggo/swag/cmd/swag@v1.16.4 init -g main.go -o docs --parseDependency --parseInternal --parseDepth 3
+      - name: go test
+        run: go test ./... -count=1
+
+  gofmt:
+    name: gofmt check (all modules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            ext/go.sum
+            agent/go.sum
+      - name: gofmt check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            echo "::error::gofmt found unformatted files (run 'gofmt -w .')"
+            exit 1
+          fi
+
+  modules:
+    name: build & test in-tree module (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # ext and agent are independent go.mod modules living in-tree; `go
+        # build/test ./...` at the repo root does not descend into them, so
+        # they need their own build+vet+test pass.
+        module: [ext, agent]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+      - name: go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+      - name: go test
+        working-directory: ${{ matrix.module }}
+        run: go test ./... -race -count=1
+
+  race:
+    name: go test -race (excl. internal/net)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            ext/go.sum
+            agent/go.sum
+      # internal/net has a pre-existing data race in the chunked downloader
+      # (rollout Step 1 现状节; fix belongs to Step 8's downloader rework).
+      # Re-include it once that lands.
+      #
+      # The three -skip entries below are the only tests in internal/fs
+      # actually affected by the tache race (github.com/xhofe/tache@v0.1.5's
+      # Base.State field isn't mutex/atomic-guarded, so any test polling a
+      # real running task's GetState() concurrently with the tache worker
+      # goroutine's SetState() trips -race): the package's other 13 tests
+      # (move/events/deps/task_i18n, plus put_test's two non-manager cases)
+      # don't touch a live task manager and stayed stable across repeated
+      # -race runs, so they keep race coverage instead of being dropped
+      # along with the whole package. TODO: remove once tache guards State
+      # itself (or this repo wraps it) upstream.
+      #
+      # TestAuthzMatrixDstWriteAuthz and TestLabelConcurrentDeleteVsApply
+      # (both server/handles) are known-flaky under -race for unrelated
+      # reasons (tracked separately) — skipped by name so the rest of
+      # server/handles still runs under -race.
+      - name: go test -race
+        run: |
+          go test $(go list ./... | grep -v 'internal/net$') -race -count=1 \
+            -skip 'TestAuthzMatrixDstWriteAuthz|TestLabelConcurrentDeleteVsApply|TestCopyTaskManager_ResumesUnfinishedTaskFromPersistedDB|TestUploadTaskManager_ResumesUnfinishedTaskFromPersistedDB|TestPutAsTask_PersistsCacheFileWhenEnabled'

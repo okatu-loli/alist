@@ -1,341 +1,206 @@
 package handles
 
 import (
-	_115 "github.com/alist-org/alist/v3/drivers/115"
-	guangyapandriver "github.com/alist-org/alist/v3/drivers/guangyapan"
-	"github.com/alist-org/alist/v3/drivers/pikpak"
-	"github.com/alist-org/alist/v3/drivers/thunder"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+
 	"github.com/alist-org/alist/v3/internal/conf"
-	"github.com/alist-org/alist/v3/internal/errs"
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/internal/offline_download/tool"
+	"github.com/alist-org/alist/v3/internal/offline_download"
 	"github.com/alist-org/alist/v3/internal/op"
-	"github.com/alist-org/alist/v3/internal/task"
+	"github.com/alist-org/alist/v3/internal/setting"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
 )
 
-type SetAria2Req struct {
-	Uri    string `json:"uri" form:"uri"`
-	Secret string `json:"secret" form:"secret"`
-}
-
-func SetAria2(c *gin.Context) {
-	var req SetAria2Req
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	items := []model.SettingItem{
-		{Key: conf.Aria2Uri, Value: req.Uri, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-		{Key: conf.Aria2Secret, Value: req.Secret, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("aria2")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	version, err := _tool.Init()
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, version)
-}
-
-type SetQbittorrentReq struct {
-	Url      string `json:"url" form:"url"`
-	Seedtime string `json:"seedtime" form:"seedtime"`
-}
-
-func SetQbittorrent(c *gin.Context) {
-	var req SetQbittorrentReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	items := []model.SettingItem{
-		{Key: conf.QbittorrentUrl, Value: req.Url, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-		{Key: conf.QbittorrentSeedtime, Value: req.Seedtime, Type: conf.TypeNumber, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("qBittorrent")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if _, err := _tool.Init(); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, "ok")
-}
-
-type SetTransmissionReq struct {
-	Uri      string `json:"uri" form:"uri"`
-	Seedtime string `json:"seedtime" form:"seedtime"`
-}
-
-func SetTransmission(c *gin.Context) {
-	var req SetTransmissionReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	items := []model.SettingItem{
-		{Key: conf.TransmissionUri, Value: req.Uri, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-		{Key: conf.TransmissionSeedtime, Value: req.Seedtime, Type: conf.TypeNumber, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("Transmission")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if _, err := _tool.Init(); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, "ok")
-}
-
-type Set115Req struct {
-	TempDir string `json:"temp_dir" form:"temp_dir"`
-}
-
-func Set115(c *gin.Context) {
-	var req Set115Req
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	if req.TempDir != "" {
-		storage, _, err := op.GetStorageAndActualPath(req.TempDir)
-		if err != nil {
-			common.ErrorStrResp(c, "storage does not exists", 400)
-			return
-		}
-		if storage.Config().CheckStatus && storage.GetStorage().Status != op.WORK {
-			common.ErrorStrResp(c, "storage not init: "+storage.GetStorage().Status, 400)
-			return
-		}
-		if _, ok := storage.(*_115.Pan115); !ok {
-			common.ErrorStrResp(c, "unsupported storage driver for offline download, only 115 Cloud is supported", 400)
-			return
-		}
-	}
-	items := []model.SettingItem{
-		{Key: conf.Pan115TempDir, Value: req.TempDir, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("115 Cloud")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if _, err := _tool.Init(); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, "ok")
-}
-
-type SetPikPakReq struct {
-	TempDir string `json:"temp_dir" form:"temp_dir"`
-}
-
-func SetPikPak(c *gin.Context) {
-	var req SetPikPakReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	if req.TempDir != "" {
-		storage, _, err := op.GetStorageAndActualPath(req.TempDir)
-		if err != nil {
-			common.ErrorStrResp(c, "storage does not exists", 400)
-			return
-		}
-		if storage.Config().CheckStatus && storage.GetStorage().Status != op.WORK {
-			common.ErrorStrResp(c, "storage not init: "+storage.GetStorage().Status, 400)
-			return
-		}
-		if _, ok := storage.(*pikpak.PikPak); !ok {
-			common.ErrorStrResp(c, "unsupported storage driver for offline download, only PikPak is supported", 400)
-			return
-		}
-	}
-	items := []model.SettingItem{
-		{Key: conf.PikPakTempDir, Value: req.TempDir, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("PikPak")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if _, err := _tool.Init(); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, "ok")
-}
-
-type SetThunderReq struct {
-	TempDir string `json:"temp_dir" form:"temp_dir"`
-}
-
-func SetThunder(c *gin.Context) {
-	var req SetThunderReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	if req.TempDir != "" {
-		storage, _, err := op.GetStorageAndActualPath(req.TempDir)
-		if err != nil {
-			common.ErrorStrResp(c, "storage does not exists", 400)
-			return
-		}
-		if storage.Config().CheckStatus && storage.GetStorage().Status != op.WORK {
-			common.ErrorStrResp(c, "storage not init: "+storage.GetStorage().Status, 400)
-			return
-		}
-		if _, ok := storage.(*thunder.Thunder); !ok {
-			common.ErrorStrResp(c, "unsupported storage driver for offline download, only Thunder is supported", 400)
-			return
-		}
-	}
-	items := []model.SettingItem{
-		{Key: conf.ThunderTempDir, Value: req.TempDir, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("Thunder")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if _, err := _tool.Init(); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, "ok")
-}
-
-type SetGuangYaPanReq struct {
-	TempDir string `json:"temp_dir" form:"temp_dir"`
-}
-
-func SetGuangYaPan(c *gin.Context) {
-	var req SetGuangYaPanReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	if req.TempDir != "" {
-		storage, _, err := op.GetStorageAndActualPath(req.TempDir)
-		if err != nil {
-			common.ErrorStrResp(c, "storage does not exists", 400)
-			return
-		}
-		if storage.Config().CheckStatus && storage.GetStorage().Status != op.WORK {
-			common.ErrorStrResp(c, "storage not init: "+storage.GetStorage().Status, 400)
-			return
-		}
-		if _, ok := storage.(*guangyapandriver.GuangYaPan); !ok {
-			common.ErrorStrResp(c, "unsupported storage driver for offline download, only GuangYaPan is supported", 400)
-			return
-		}
-	}
-	items := []model.SettingItem{
-		{Key: conf.GuangYaPanTempDir, Value: req.TempDir, Type: conf.TypeString, Group: model.OFFLINE_DOWNLOAD, Flag: model.PRIVATE},
-	}
-	if err := op.SaveSettingItems(items); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	_tool, err := tool.Tools.Get("GuangYaPan")
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if _, err := _tool.Init(); err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	common.SuccessResp(c, "ok")
-}
-
-func OfflineDownloadTools(c *gin.Context) {
-	tools := tool.Tools.Names()
-	common.SuccessResp(c, tools)
-}
-
+// AddOfflineDownloadReq is the add-offline-download body. Tool selects the
+// download backend: empty falls back to the offline_download_tool setting
+// (default "SimpleHttp"); "SimpleHttp" forces the built-in direct path; any
+// other value routes the batch through the matching daemon tool extension.
 type AddOfflineDownloadReq struct {
-	Urls         []string `json:"urls"`
-	Path         string   `json:"path"`
-	Tool         string   `json:"tool"`
-	DeletePolicy string   `json:"delete_policy"`
+	Path string   `json:"path"`
+	URLs []string `json:"urls"`
+	Tool string   `json:"tool"`
 }
 
-func AddOfflineDownload(c *gin.Context) {
-	user := c.MustGet("user").(*model.User)
+// defaultToolName reports the tool a fresh offline-download dialog should
+// preselect: the offline_download_tool setting (default "SimpleHttp"), but
+// normalized back to "SimpleHttp" when that setting names a tool that is not
+// currently available (unregistered / disabled owning extension), so the client
+// never preselects an option the picker won't list. Membership is checked
+// against AvailableToolNames — the exact set the endpoint returns — which always
+// contains "SimpleHttp".
+func defaultToolName() string {
+	name := setting.GetStr(conf.OfflineDownloadTool, "SimpleHttp")
+	for _, t := range offline_download.AvailableToolNames() {
+		if t == name {
+			return name
+		}
+	}
+	return "SimpleHttp"
+}
 
+// ListOfflineDownloadTools returns the offline-download tools the caller may
+// pick for an add — AvailableToolNames (SimpleHttp first, then every enabled
+// registered tool) plus the default the dialog should preselect. It is an authed
+// read gated by the same builtin.offline_download feature as add_offline_download,
+// so any logged-in user with the offline-download feature can populate the picker.
+// @Summary List offline-download tools
+// @Description Returns the offline-download tools this caller may select (SimpleHttp plus every enabled daemon tool) and the tool the picker should preselect (the offline_download_tool setting, normalized back to SimpleHttp if that setting names an unavailable tool).
+// @Tags offline-download
+// @Security ApiKeyAuth
+// @Produce json
+// @Success 200 {object} common.Resp[gin.H] "data: {tools: []string, default: string}"
+// @Failure 401 {object} common.Resp[any]
+// @Failure 403 {object} common.Resp[any] "builtin.offline_download disabled"
+// @Router /v4/fs/offline_download/tools [get]
+func ListOfflineDownloadTools(c *gin.Context) {
+	common.SuccessResp(c, gin.H{
+		"tools":   offline_download.AvailableToolNames(),
+		"default": defaultToolName(),
+	})
+}
+
+// AddOfflineDownload queues one background DownloadTask per URL, targeting the
+// directory at req.Path in the caller's virtual filesystem.
+//
+// Authorization is a DOUBLE gate on the target path, and the order is
+// deliberate: ActWrite first (creating a file there is the root security
+// boundary — no write, no business asking about offline downloads), then
+// ActOfflineDownload (the capability bit that specifically permits pulling a
+// remote URL server-side). Missing either is a 403. Both run before any task is
+// created, so a denied caller never queues work.
+//
+// URL validation is all-or-nothing: the whole batch is rejected (400) the
+// moment any entry is not a syntactically valid http/https URL, so a caller
+// never gets a half-applied submission where some URLs queued and one silently
+// vanished. Blank entries (after trimming) are skipped, not rejected. The
+// SSRF-safe fetch in the task layer re-checks the resolved IP at dial time; the
+// scheme check here is only the cheap up-front guard.
+//
+// Tool selection: req.Tool wins; empty falls back to the offline_download_tool
+// setting (default "SimpleHttp"). "SimpleHttp"/"none"/empty resolution builds the
+// built-in direct-download task (unchanged); any other name builds daemon tasks
+// (Toolname set, TempDir under conf.TempDir/<tool>). Availability of a daemon
+// tool depends on WHO named it: a tool the CALLER explicitly named but that is
+// unavailable/disabled is a 400 (they asked for something we can't do), whereas a
+// stale/unavailable SETTING default silently falls back to SimpleHttp so a plain
+// add never 400s just because an admin later disabled the default daemon.
+// @Summary Queue an offline download
+// @Description Queues one background download task per URL into the target directory (path is joined with the caller's base path). Requires ActWrite and ActOfflineDownload on path. tool selects the download backend; empty falls back to the offline_download_tool setting (default SimpleHttp).
+// @Tags offline-download
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param body body AddOfflineDownloadReq true "path/urls/tool"
+// @Success 200 {object} common.Resp[[]TaskInfo]
+// @Failure 400 {object} common.Resp[any] "bad request, no urls, invalid url, or explicitly named tool unavailable"
+// @Failure 401 {object} common.Resp[any]
+// @Failure 403 {object} common.Resp[any] "permission denied or builtin.offline_download disabled"
+// @Failure 500 {object} common.Resp[any]
+// @Router /v4/fs/add_offline_download [post]
+func AddOfflineDownload(c *gin.Context) {
 	var req AddOfflineDownloadReq
 	if err := c.ShouldBind(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
+	user := c.MustGet(ctxkey.User).(*model.User)
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
+		common.ErrorResp(c, err, 400)
+		return
+	}
+	// Double Authorize: write permission (the root boundary for creating a file)
+	// then the offline-download capability bit. Either missing -> 403.
+	if err := op.Authorize(c, user, model.ActWrite, op.AuthzRequest{Path: reqPath}); err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	if !common.CheckPathLimitWithRoles(user, reqPath) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
+	if err := op.Authorize(c, user, model.ActOfflineDownload, op.AuthzRequest{Path: reqPath}); err != nil {
+		common.ErrorResp(c, err, 403)
 		return
 	}
-	perm := common.MergeRolePermissions(user, reqPath)
-	if !common.HasPermission(perm, common.PermAddOfflineDownload) {
-		common.ErrorStrResp(c, "permission denied", 403)
+	if len(req.URLs) == 0 {
+		common.ErrorResp(c, errors.New("no urls"), 400)
 		return
 	}
-	var tasks []task.TaskExtensionInfo
-	for _, url := range req.Urls {
-		t, err := tool.AddURL(c, &tool.AddURLArgs{
-			URL:          url,
-			DstDirPath:   reqPath,
-			Tool:         req.Tool,
-			DeletePolicy: tool.DeletePolicy(req.DeletePolicy),
-		})
-		if err != nil {
-			common.ErrorResp(c, err, 500)
+	storage, actual, err := op.GetStorageAndActualPath(reqPath)
+	if err != nil {
+		common.ErrorResp(c, err, 500)
+		return
+	}
+	// Validate the ENTIRE batch before queuing anything: all-or-nothing means a
+	// single bad URL rejects the whole submission, so a valid URL earlier in the
+	// list must not have already been queued when a later one fails. Two passes:
+	// collect+validate first, then Add only once every URL has passed.
+	var clean []string
+	for _, raw := range req.URLs {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue // blank entries are skipped, not an error
+		}
+		pu, e := url.Parse(u)
+		if e != nil || (pu.Scheme != "http" && pu.Scheme != "https") {
+			common.ErrorResp(c, fmt.Errorf("invalid url %q (only http/https)", raw), 400)
 			return
 		}
-		if t != nil {
-			tasks = append(tasks, t)
+		clean = append(clean, u)
+	}
+	if len(clean) == 0 {
+		common.ErrorResp(c, errors.New("no urls"), 400)
+		return
+	}
+
+	// Resolve the effective tool. explicitTool records whether the caller NAMED
+	// it: that distinguishes an explicit-unavailable (400) from a stale-default
+	// (silent SimpleHttp fallback) below.
+	explicitTool := strings.TrimSpace(req.Tool) != ""
+	toolName := strings.TrimSpace(req.Tool)
+	if toolName == "" {
+		toolName = setting.GetStr(conf.OfflineDownloadTool, "SimpleHttp")
+	}
+	daemon := false
+	if toolName != "" && toolName != "SimpleHttp" && toolName != "none" {
+		if offline_download.ToolByName(toolName) == nil {
+			// The named daemon tool is unregistered/disabled.
+			if explicitTool {
+				// The caller asked for this specific tool: refuse rather than
+				// silently downloading via a different mechanism.
+				common.ErrorResp(c, fmt.Errorf("offline download tool %q is not available or not enabled", toolName), 400)
+				return
+			}
+			// Stale/unavailable SETTING default: fall back to SimpleHttp so a plain
+			// add still succeeds.
+			toolName = "SimpleHttp"
+		} else {
+			daemon = true
 		}
 	}
-	common.SuccessResp(c, gin.H{
-		"tasks": getTaskInfos(tasks),
-	})
+
+	mountPath := storage.GetStorage().MountPath
+	infos := make([]TaskInfo, 0, len(clean))
+	for _, u := range clean {
+		var t *offline_download.DownloadTask
+		if daemon {
+			// Daemon path: Toolname set + a per-download TempDir
+			// (conf.TempDir/<tool>/<uuid>) the tool downloads into and the transfer
+			// engine later drains into the destination storage.
+			t = offline_download.NewDaemonDownloadTask(toolName, u, mountPath, actual)
+		} else {
+			// SimpleHttp direct path: Toolname empty, unchanged behavior.
+			t = &offline_download.DownloadTask{
+				URL:              u,
+				DstStorageMp:     mountPath,
+				DstDirActualPath: actual,
+			}
+		}
+		t.SetCreator(user)
+		offline_download.OfflineDownloadTaskManager.Add(t)
+		infos = append(infos, getTaskInfo(c, t))
+	}
+	common.SuccessResp(c, infos)
 }

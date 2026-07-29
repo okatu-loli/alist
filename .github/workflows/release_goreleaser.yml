@@ -1,0 +1,140 @@
+# goreleaser-driven release pipeline (see .goreleaser.yaml for why goreleaser
+# doesn't do the actual Go builds here). Named release_goreleaser.yml rather
+# than release.yml because that name is already taken by the pre-existing
+# release-published pipeline (xgo-based, uploads to a manually-published GH
+# release, then bumps the desktop-release repo). The two are independent for
+# now; .goreleaser.yaml deliberately drafts its release (does not publish)
+# so it can't cross-trigger the old one via a `release: published` event.
+name: release_goreleaser
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # linux/darwin/windows × amd64/arm64. Linux ships musl-static (same
+        # toolchain build.sh's own musl release builds use); darwin/windows
+        # go through go-cross/cgo-actions' xgo-backed path, same as
+        # build.yml's existing PR-preview build matrix.
+        target:
+          - darwin-amd64
+          - darwin-arm64
+          - windows-amd64
+          - windows-arm64
+          - linux-amd64-musl
+          - linux-arm64-musl
+    env:
+      GOPROXY: https://proxy.golang.org,direct
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch web frontend (release)
+        run: bash build.sh release web
+
+      - name: Compute version metadata
+        id: vermeta
+        run: |
+          echo "built_at=$(date +'%F %T %z')" >> "$GITHUB_OUTPUT"
+          echo "git_commit=$(git log --pretty=format:'%h' -1)" >> "$GITHUB_OUTPUT"
+          web_version=$(wget -qO- -t1 -T2 "https://api.github.com/repos/alist-org/alist-web/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
+          echo "web_version=$web_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        uses: go-cross/cgo-actions@v1
+        with:
+          targets: ${{ matrix.target }}
+          musl-target-format: $os-$musl-$arch
+          out-dir: build
+          # Same ldflags scheme as build.sh / build.yml: internal/conf's
+          # package-level vars, not main.version et al.
+          x-flags: |
+            github.com/alist-org/alist/v3/internal/conf.BuiltAt=${{ steps.vermeta.outputs.built_at }}
+            github.com/alist-org/alist/v3/internal/conf.GitAuthor=Xhofe <i@nn.ci>
+            github.com/alist-org/alist/v3/internal/conf.GitCommit=${{ steps.vermeta.outputs.git_commit }}
+            github.com/alist-org/alist/v3/internal/conf.Version=${{ github.ref_name }}
+            github.com/alist-org/alist/v3/internal/conf.WebVersion=${{ steps.vermeta.outputs.web_version }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alist-bin-${{ matrix.target }}
+          path: build/*
+          retention-days: 1
+
+  release:
+    needs: build
+    name: Package & release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: build
+          pattern: alist-bin-*
+          merge-multiple: true
+
+      - name: Package archives
+        run: |
+          set -e
+          # release-pkg/, not pkg/ — this repo already has a real ./pkg Go
+          # package tree at the root; do not collide with it.
+          mkdir -p dist-release release-pkg
+          for t in linux-amd64-musl linux-arm64-musl darwin-amd64 darwin-arm64; do
+            cp "build/alist-$t" release-pkg/alist
+            chmod +x release-pkg/alist
+            tar -C release-pkg -czvf "dist-release/alist-$t.tar.gz" alist
+            rm -f release-pkg/alist
+          done
+          for t in windows-amd64 windows-arm64; do
+            cp "build/alist-$t.exe" release-pkg/alist.exe
+            (cd release-pkg && zip -j "../dist-release/alist-$t.zip" alist.exe)
+            rm -f release-pkg/alist.exe
+          done
+          ls -la dist-release
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

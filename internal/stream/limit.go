@@ -34,6 +34,38 @@ var (
 	ServerUploadLimit   Limiter
 )
 
+// burstLimiter wraps a rate.Limiter so a WaitN whose n exceeds the burst size
+// never errors ("would exceed context deadline" / "exceeds limiter's burst"):
+// it drains the request in burst-sized chunks instead. A single Write from a
+// copy loop can be far larger than one second of tokens, so the raw
+// rate.Limiter.WaitN would reject it; this lets such a write block smoothly.
+type burstLimiter struct {
+	*rate.Limiter
+}
+
+func (l burstLimiter) WaitN(ctx context.Context, total int) error {
+	for total > 0 {
+		n := l.Burst()
+		if l.Limiter.Limit() == rate.Inf || n > total {
+			n = total
+		}
+		if err := l.Limiter.WaitN(ctx, n); err != nil {
+			return err
+		}
+		total -= n
+	}
+	return nil
+}
+
+// NewBurstLimiter builds a Limiter for `limit` tokens/sec with the given burst
+// that tolerates WaitN calls larger than the burst (see burstLimiter). It is the
+// one constructor for the process's stream limiters — the global caps in
+// bootstrap and the per-connection download cap both use it — so their
+// burst-chunking behavior is identical.
+func NewBurstLimiter(limit rate.Limit, burst int) Limiter {
+	return burstLimiter{Limiter: rate.NewLimiter(limit, burst)}
+}
+
 type RateLimitReader struct {
 	io.Reader
 	Limiter Limiter

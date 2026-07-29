@@ -1,0 +1,72 @@
+# goreleaser config for the main alist binary's GitHub release.
+#
+# alist links mattn/go-sqlite3 (gorm.io/driver/sqlite, wired unconditionally
+# in internal/bootstrap/db.go), so every release build needs CGO plus a
+# matching cross C toolchain per target. GoReleaser OSS's own `go` builder
+# has no first-class support for the musl/osxcross/mingw toolchains this
+# repo already depends on, and the `prebuilt` builder that would otherwise
+# let it just package externally-built binaries is a GoReleaser Pro-only
+# feature (confirmed against the OSS v2 config schema: config.Build has no
+# `prebuilt` field) — so this config does not use `builds:`/`archives:` at
+# all.
+#
+# The release workflow (.github/workflows/release_goreleaser.yml)
+# cross-compiles the six linux/darwin/windows × amd64/arm64 binaries with
+# go-cross/cgo-actions — the same action build.yml already uses for this
+# exact target matrix — reusing build.sh's own version/ldflags scheme, then
+# packages them into archives itself. GoReleaser's job here is just the
+# parts that don't need a Go toolchain at all: changelog generation, sha256
+# checksums over the pre-built archives, and creating the GitHub release.
+#
+# Validate locally: goreleaser check
+version: 2
+
+project_name: alist
+
+# GoReleaser always wants at least one build; explicitly skip it (see the
+# comment above) rather than letting it fall back to its own default `go`
+# builder, which would silently produce CGO_ENABLED=0 binaries with the
+# wrong ldflags variable names (main.version instead of
+# internal/conf.Version) instead of using the ones release_goreleaser.yml
+# already built.
+builds:
+  - id: alist
+    skip: true
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+  extra_files:
+    - glob: ./dist-release/*
+
+changelog:
+  sort: asc
+  use: git
+  abbrev: -1
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: "Bug fixes"
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  name_template: "{{ .Tag }}"
+  # rc/beta tags are flagged as prereleases automatically.
+  prerelease: auto
+  # Draft, not published, on purpose: the pre-existing release.yml still
+  # triggers on `release: published`, rebuilds with xgo, uploads its own
+  # assets, and bumps the desktop-release repo's tag. Auto-publishing here
+  # would fire that workflow a second time against the same tag. Flip to
+  # `false` (and retire/gate release.yml) once this pipeline is the sole
+  # release path.
+  draft: true
+  extra_files:
+    - glob: ./dist-release/*
+  # Docker images stay on the existing release_docker.yml pipeline (already
+  # multi-arch via QEMU+buildx with 4 image variants) — this config does not
+  # also own a `dockers:` section, to avoid two workflows racing to publish
+  # the same tags.

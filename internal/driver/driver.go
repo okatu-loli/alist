@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/pkg/utils"
 )
 
 type Driver interface {
@@ -160,6 +161,29 @@ type PutResult interface {
 	// mutex like `semaphore.Weighted` to limit the maximum number of upload threads, preventing excessive
 	// memory usage caused by buffering too many file chunks awaiting upload.
 	Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up UpdateProgress) (model.Obj, error)
+}
+
+// PutRapid is the OPTIONAL "秒传" (hash-based rapid-upload) interface: a driver
+// implements it when its provider can register a file into a destination
+// directory purely by CONTENT HASH, without transferring the bytes, whenever
+// the provider already holds matching content. It is the fast path the
+// remote-agent copy executor tries BEFORE falling back to download+stream —
+// see op.PutRapid and server/handles.agentTaskTryRapidCore.
+//
+// The hashes passed in are ONLY those a source object already exposes (from
+// List/Get); an implementation must NEVER read/spool bytes to compute a hash
+// itself — that would defeat the entire point of a rapid upload. If none of the
+// provided hash types is usable by the provider, return
+// (nil, false, errs.NotSupport) so the caller streams instead.
+type PutRapid interface {
+	// TryRapidUpload registers a file named name (of the given size) into dstDir
+	// by hash WITHOUT transferring any bytes, if the provider already has
+	// matching content.
+	//
+	//	(obj, true,  nil)              — hit: the file now exists at dstDir/name.
+	//	(nil, false, nil)              — no match: the caller must stream the bytes.
+	//	(nil, false, errs.NotSupport)  — none of the provided hash types is usable.
+	TryRapidUpload(ctx context.Context, dstDir model.Obj, name string, size int64, hashes utils.HashInfo) (model.Obj, bool, error)
 }
 
 type PutURLResult interface {

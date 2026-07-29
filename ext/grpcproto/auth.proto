@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// AuthProviderService mirrors ext.AuthProvider (WS-8): a Kind=AuthProvider
+// plugin exchanges an OAuth authorization code for a token entirely inside its
+// own process — calling the vendor's token endpoint directly with its own
+// client_id/secret — so no external broker sits in the path between the host
+// and the storage vendor.
+service AuthProviderService {
+  // GetManifest is the handshake: the manifest the host builds its wizard
+  // integration from. driver_config_json is unused by AuthProvider (empty).
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // AuthURL builds the vendor's authorization-page URL.
+  rpc AuthURL(AuthURLRequest) returns (AuthURLReply);
+  // Exchange trades an authorization code for a token, locally.
+  rpc Exchange(ExchangeRequest) returns (TokenReply);
+  // Refresh trades a refresh token for a fresh access token, locally.
+  rpc Refresh(RefreshRequest) returns (TokenReply);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id it
+  // passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+message AuthURLRequest {
+  string state = 1;
+  string redirect_uri = 2;
+  repeated string scopes = 3;
+}
+
+message AuthURLReply {
+  string url = 1;
+  ErrorProto error = 2;
+}
+
+message ExchangeRequest {
+  string code = 1;
+  string redirect_uri = 2;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+// Token mirrors ext.Token. raw_json is the provider-specific map[string]any
+// (ext.Token.Raw) marshaled as JSON, round-tripped verbatim.
+message Token {
+  string access_token = 1;
+  string refresh_token = 2;
+  int64 expires_in = 3;
+  string token_type = 4;
+  bytes raw_json = 5;
+}
+
+message TokenReply {
+  Token token = 1;
+  ErrorProto error = 2;
+}

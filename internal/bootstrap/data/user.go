@@ -13,7 +13,14 @@ import (
 	"gorm.io/gorm"
 )
 
-func initUser() {
+// initUser seeds the guest and admin users on first boot. It returns
+// isNewInstall=true only for the exact run where the admin user did not
+// exist yet and was just created — i.e. a genuinely brand-new install, as
+// opposed to every subsequent boot of an already-initialized instance. The
+// caller (InitData) uses this to mark conf.SetupCompleted="false" so the
+// first-run setup wizard is shown; existing instances (isNewInstall=false)
+// never have that flag touched and keep their seeded/persisted value.
+func initUser() (isNewInstall bool) {
 	guest, err := op.GetGuest()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -24,7 +31,6 @@ func initUser() {
 				PwdHash:    model.TwoHashPwd("guest", salt),
 				Salt:       salt,
 				Role:       model.Roles{int(guestRole.ID)},
-				BasePath:   "/",
 				Permission: 0,
 				Disabled:   true,
 				Authn:      "[]",
@@ -53,7 +59,6 @@ func initUser() {
 				Salt:     salt,
 				PwdHash:  model.TwoHashPwd(adminPassword, salt),
 				Role:     model.Roles{int(adminRole.ID)},
-				BasePath: "/",
 				Authn:    "[]",
 				// 0(can see hidden) - 7(can remove) & 12(can read archives) - 13(can decompress archives)
 				Permission: 0xFFFF,
@@ -62,9 +67,11 @@ func initUser() {
 				panic(err)
 			} else {
 				utils.Log.Infof("Successfully created the admin user and the initial password is: %s", adminPassword)
+				isNewInstall = true
 			}
 		} else {
 			utils.Log.Fatalf("[init user] Failed to get admin user: %v", err)
 		}
 	}
+	return isNewInstall
 }

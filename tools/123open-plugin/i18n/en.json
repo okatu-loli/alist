@@ -1,0 +1,14 @@
+{
+  "field.client_id.label": "Client ID",
+  "field.client_id.help": "The Client ID of your 123 open platform application.",
+  "field.client_secret.label": "Client Secret",
+  "field.client_secret.help": "The Client Secret (key) of your 123 open platform application.",
+  "field.private_key.label": "Direct-link signing private key",
+  "field.private_key.help": "Only needed to enable direct-link auth: used to sign the auth_key on download links. Leave blank if you don't use direct-link auth.",
+  "field.uid.label": "Cloud drive UID",
+  "field.uid.help": "Your 123 Pan account UID (visible on the web settings page); paired with the private key to sign direct links.",
+  "field.valid_duration.label": "Direct-link validity (minutes)",
+  "field.valid_duration.help": "How long a signed direct link stays valid, in minutes. Default 30.",
+  "field.root_folder_id.label": "Root folder ID",
+  "field.root_folder_id.help": "The folder ID to use as this storage's root. Default 0 means the drive's root."
+}

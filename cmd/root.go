@@ -6,8 +6,6 @@ import (
 
 	"github.com/alist-org/alist/v3/cmd/flags"
 	_ "github.com/alist-org/alist/v3/drivers"
-	_ "github.com/alist-org/alist/v3/internal/archive"
-	_ "github.com/alist-org/alist/v3/internal/offline_download"
 	"github.com/spf13/cobra"
 )
 
@@ -33,4 +31,5 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.Dev, "dev", false, "start with dev mode")
 	RootCmd.PersistentFlags().BoolVar(&flags.ForceBinDir, "force-bin-dir", false, "Force to use the directory where the binary file is located as data directory")
 	RootCmd.PersistentFlags().BoolVar(&flags.LogStd, "log-std", false, "Force to log to std")
+	RootCmd.PersistentFlags().StringVar(&flags.MigrateMode, "migrate-mode", "auto", "schema path on startup: auto | off | legacy")
 }

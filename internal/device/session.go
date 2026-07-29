@@ -7,6 +7,7 @@ import (
 	"github.com/alist-org/alist/v3/internal/db"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/internal/session"
 	"github.com/alist-org/alist/v3/internal/setting"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/pkg/errors"
@@ -38,28 +39,43 @@ func Handle(userID uint, deviceKey, ua, ip string) error {
 		return err
 	}
 
-	max := setting.GetInt(conf.MaxDevices, 0)
-	if max > 0 {
-		count, err := db.CountActiveSessionsByUser(userID)
-		if err != nil {
-			return err
-		}
-		if count >= int64(max) {
-			policy := setting.GetStr(conf.DeviceEvictPolicy, "deny")
-			if policy == "evict_oldest" {
-				if oldest, err := db.GetOldestActiveSession(userID); err == nil {
-					if err := db.MarkInactive(oldest.DeviceKey); err != nil {
-						return err
-					}
-				}
-			} else {
-				return errors.WithStack(errs.TooManyDevices)
-			}
-		}
+	if err := enforceMaxDevices(userID); err != nil {
+		return err
 	}
 
 	s := &model.Session{UserID: userID, DeviceKey: deviceKey, UserAgent: ua, IP: ip, LastActive: now, Status: model.SessionActive}
 	return db.CreateSession(s)
+}
+
+// enforceMaxDevices applies the MaxDevices/DeviceEvictPolicy setting for a
+// user: if the number of active sessions has reached the configured max, it
+// either evicts the oldest active session (policy "evict_oldest", routed
+// through session.MarkInactive so the evicted session's tokens are revoked
+// too) or denies with errs.TooManyDevices (any other policy, including the
+// default "deny"). A no-op when MaxDevices is unset (<=0) or the limit
+// hasn't been reached yet.
+func enforceMaxDevices(userID uint) error {
+	max := setting.GetInt(conf.MaxDevices, 0)
+	if max <= 0 {
+		return nil
+	}
+	count, err := db.CountActiveSessionsByUser(userID)
+	if err != nil {
+		return err
+	}
+	if count < int64(max) {
+		return nil
+	}
+	policy := setting.GetStr(conf.DeviceEvictPolicy, "deny")
+	if policy != "evict_oldest" {
+		return errors.WithStack(errs.TooManyDevices)
+	}
+	if oldest, err := db.GetOldestActiveSession(userID); err == nil {
+		if err := session.MarkInactive(oldest.DeviceKey); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EnsureActiveOnLogin is used only in login flow:
@@ -72,24 +88,8 @@ func EnsureActiveOnLogin(userID uint, deviceKey, ua, ip string) error {
 	sess, err := db.GetSession(userID, deviceKey)
 	if err == nil {
 		if sess.Status == model.SessionInactive {
-			max := setting.GetInt(conf.MaxDevices, 0)
-			if max > 0 {
-				count, err := db.CountActiveSessionsByUser(userID)
-				if err != nil {
-					return err
-				}
-				if count >= int64(max) {
-					policy := setting.GetStr(conf.DeviceEvictPolicy, "deny")
-					if policy == "evict_oldest" {
-						if oldest, gerr := db.GetOldestActiveSession(userID); gerr == nil {
-							if err := db.MarkInactive(oldest.DeviceKey); err != nil {
-								return err
-							}
-						}
-					} else {
-						return errors.WithStack(errs.TooManyDevices)
-					}
-				}
+			if err := enforceMaxDevices(userID); err != nil {
+				return err
 			}
 		}
 		sess.Status = model.SessionActive
@@ -102,24 +102,8 @@ func EnsureActiveOnLogin(userID uint, deviceKey, ua, ip string) error {
 		return err
 	}
 
-	max := setting.GetInt(conf.MaxDevices, 0)
-	if max > 0 {
-		count, err := db.CountActiveSessionsByUser(userID)
-		if err != nil {
-			return err
-		}
-		if count >= int64(max) {
-			policy := setting.GetStr(conf.DeviceEvictPolicy, "deny")
-			if policy == "evict_oldest" {
-				if oldest, gerr := db.GetOldestActiveSession(userID); gerr == nil {
-					if err := db.MarkInactive(oldest.DeviceKey); err != nil {
-						return err
-					}
-				}
-			} else {
-				return errors.WithStack(errs.TooManyDevices)
-			}
-		}
+	if err := enforceMaxDevices(userID); err != nil {
+		return err
 	}
 
 	return db.CreateSession(&model.Session{

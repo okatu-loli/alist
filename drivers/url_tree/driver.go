@@ -317,8 +317,4 @@ func (d *Urls) updateStorage() {
 	op.MustSaveDriverStorage(d)
 }
 
-//func (d *Template) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
-//	return nil, errs.NotSupport
-//}
-
 var _ driver.Driver = (*Urls)(nil)

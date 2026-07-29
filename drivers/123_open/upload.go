@@ -7,6 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"runtime"
+	"strconv"
+	"sync/atomic"
+	"time"
+
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/model"
@@ -15,13 +23,13 @@ import (
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/go-resty/resty/v2"
 	"golang.org/x/sync/errgroup"
-	"io"
-	"mime/multipart"
-	"net/http"
-	"runtime"
-	"strconv"
-	"time"
 )
+
+// singleUploadThreshold is the file-size boundary (bytes) below which the
+// driver uses the single-request upload endpoint instead of the sliced
+// create->slice->complete flow. It matches the v3 behavior (1 GiB) and is only
+// lowered by tests to exercise the sliced path without huge fixtures.
+var singleUploadThreshold int64 = 1 << 30
 
 func (d *Open123) create(parentFileID int64, filename, etag string, size int64, duplicate int, containDir bool) (*UploadCreateResp, error) {
 	var resp UploadCreateResp
@@ -90,6 +98,9 @@ func (d *Open123) UploadSingle(ctx context.Context, createResp *UploadCreateResp
 	mw.WriteField("size", fmt.Sprint(file.GetSize()))
 	fw, _ := mw.CreateFormFile("file", file.GetName())
 	_, err = io.Copy(fw, reader)
+	if err != nil {
+		return err
+	}
 	mw.Close()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", domain+ApiSingleUploadURL, &b)
@@ -149,13 +160,12 @@ func (d *Open123) Upload(ctx context.Context, file model.FileStreamer, parentID 
 			threads = 16
 		}
 		d.UploadThread = threads
-		fmt.Printf("[Upload] Auto set upload concurrency: %d (CPU cores=%d)\n", d.UploadThread, cpuCores)
 	}
 
-	fmt.Printf("[Upload] File size: %d bytes, chunk size: %d bytes, total slices: %d, concurrency: %d\n",
+	utils.Log.Debugf("[123open] file size: %d bytes, chunk size: %d bytes, slices: %d, concurrency: %d",
 		size, chunkSize, uploadNums, d.UploadThread)
 
-	if size <= 1<<30 {
+	if size <= singleUploadThreshold {
 		return d.UploadSingle(ctx, createResp, file, parentID)
 	}
 
@@ -168,7 +178,10 @@ func (d *Open123) Upload(ctx context.Context, file model.FileStreamer, parentID 
 	semaphore := make(chan struct{}, d.UploadThread)
 	threadG, _ := errgroup.WithContext(ctx)
 
-	var progressArr = make([]int64, uploadNums)
+	// A single atomic running total; each part adds its length exactly once on
+	// success. Avoids the prior slice-of-per-part write + whole-slice read, which
+	// raced (concurrent read-while-write on shared []int64 elements).
+	var uploaded atomic.Int64
 
 	for partIndex := int64(0); partIndex < uploadNums; partIndex++ {
 		partIndex := partIndex
@@ -180,16 +193,15 @@ func (d *Open123) Upload(ctx context.Context, file model.FileStreamer, parentID 
 			length := min(chunkSize, size-offset)
 			partNumber := partIndex + 1
 
-			fmt.Printf("[Slice %d] Starting read from offset %d, length %d\n", partNumber, offset, length)
 			reader, err := file.RangeRead(http_range.Range{Start: offset, Length: length})
 			if err != nil {
-				return fmt.Errorf("[Slice %d] RangeRead error: %v", partNumber, err)
+				return fmt.Errorf("[slice %d] RangeRead error: %v", partNumber, err)
 			}
 
 			buf := make([]byte, length)
 			n, err := io.ReadFull(reader, buf)
 			if err != nil && err != io.EOF {
-				return fmt.Errorf("[Slice %d] Read error: %v", partNumber, err)
+				return fmt.Errorf("[slice %d] read error: %v", partNumber, err)
 			}
 			buf = buf[:n]
 			hash := md5.Sum(buf)
@@ -206,6 +218,7 @@ func (d *Open123) Upload(ctx context.Context, file model.FileStreamer, parentID 
 			writer.Close()
 
 			resp, err := client.R().
+				SetContext(ctx).
 				SetHeader("Authorization", "Bearer "+d.tm.accessToken).
 				SetHeader("Platform", "open_platform").
 				SetHeader("Content-Type", writer.FormDataContentType()).
@@ -213,24 +226,17 @@ func (d *Open123) Upload(ctx context.Context, file model.FileStreamer, parentID 
 				Post(uploadDomain + ApiUploadSliceURL)
 
 			if err != nil {
-				return fmt.Errorf("[Slice %d] Upload HTTP error: %v", partNumber, err)
+				return fmt.Errorf("[slice %d] upload HTTP error: %v", partNumber, err)
 			}
 			if resp.StatusCode() != 200 {
-				return fmt.Errorf("[Slice %d] Upload failed with status: %s, resp: %s", partNumber, resp.Status(), resp.String())
+				return fmt.Errorf("[slice %d] upload failed with status: %s, resp: %s", partNumber, resp.Status(), resp.String())
 			}
 
-			progressArr[partIndex] = length
-			var totalUploaded int64 = 0
-			for _, v := range progressArr {
-				totalUploaded += v
-			}
+			totalUploaded := uploaded.Add(length)
 			if up != nil {
 				percent := float64(totalUploaded) / float64(size) * 100
 				up(percent)
 			}
-
-			fmt.Printf("[Slice %d] MD5: %s\n", partNumber, sliceMD5Str)
-			fmt.Printf("[Slice %d] Upload finished\n", partNumber)
 			return nil
 		})
 	}
@@ -272,7 +278,7 @@ func (d *Open123) Upload(ctx context.Context, file model.FileStreamer, parentID 
 			return fmt.Errorf("completion API returned error code %d: %s", completeResp.Code, completeResp.Message)
 		}
 		if completeResp.Data.Completed && completeResp.Data.FileID != 0 {
-			fmt.Printf("[Upload] Upload completed successfully. FileID: %d\n", completeResp.Data.FileID)
+			utils.Log.Debugf("[123open] upload completed successfully, fileID: %d", completeResp.Data.FileID)
 			break
 		}
 		time.Sleep(time.Second)

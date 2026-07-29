@@ -3,6 +3,7 @@ package handles
 import (
 	"bytes"
 	"fmt"
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 	"io"
 	stdpath "path"
 	"strconv"
@@ -21,8 +22,20 @@ import (
 	"github.com/yuin/goldmark/extension"
 )
 
+// Down resolves a signed direct-download link for a path and redirects to it
+// (or falls back to Proxy when the storage requires it).
+// @Summary Download (redirect)
+// @Description Resolves the storage's direct link for the signed path and issues a 302 redirect to it; proxies through the server instead when the storage requires it (WebProxy/must-proxy/proxy_types, etc). Mounted at the top-level route (not under /api) as GET and HEAD /d/{path}; the path must carry a valid `sign` query parameter (see middlewares.Down) rather than an Authorization header.
+// @Tags download
+// @Produce json
+// @Param path path string true "storage-relative file path"
+// @Param sign query string true "path signature, see /admin/signing_key"
+// @Param type query string false "link type hint passed through to the driver"
+// @Success 302 {string} string "redirect to the resolved direct link"
+// @Failure 500 {object} common.Resp[any]
+// @Router /../d/{path} [get]
 func Down(c *gin.Context) {
-	rawPath := c.MustGet("path").(string)
+	rawPath := c.MustGet(ctxkey.Path).(string)
 	filename := stdpath.Base(rawPath)
 	storage, err := fs.GetStorage(rawPath, &fs.GetStoragesArgs{})
 	if err != nil {
@@ -44,12 +57,28 @@ func Down(c *gin.Context) {
 			common.ErrorResp(c, err, 500)
 			return
 		}
+		common.CompleteLink(c.Request, link)
 		down(c, link)
 	}
 }
 
+// Proxy streams a file's content through the server rather than redirecting to
+// the storage's direct link (used when the storage forbids direct links, or the
+// caller opted into proxying via /p/{path}).
+// @Summary Download (proxied through server)
+// @Description Streams the file content through this server instead of redirecting. Markdown files are additionally rendered to sanitized HTML when the filter-readme-scripts setting is on. Mounted at the top-level route (not under /api) as GET and HEAD /p/{path}; the path must carry a valid `sign` query parameter (see middlewares.Down) rather than an Authorization header.
+// @Tags download
+// @Produce octet-stream
+// @Param path path string true "storage-relative file path"
+// @Param sign query string true "path signature, see /admin/signing_key"
+// @Param type query string false "link type hint passed through to the driver"
+// @Param d query string false "presence disables redirect to the storage's down_proxy_url"
+// @Success 200 {file} file "file content"
+// @Failure 403 {object} common.Resp[any] "proxy not allowed for this storage/file type"
+// @Failure 500 {object} common.Resp[any]
+// @Router /../p/{path} [get]
 func Proxy(c *gin.Context) {
-	rawPath := c.MustGet("path").(string)
+	rawPath := c.MustGet(ctxkey.Path).(string)
 	filename := stdpath.Base(rawPath)
 	storage, err := fs.GetStorage(rawPath, &fs.GetStoragesArgs{})
 	if err != nil {
@@ -91,7 +120,7 @@ func Proxy(c *gin.Context) {
 		}
 		localProxy(c, link, file, storage.GetStorage().ProxyRange)
 	} else {
-		common.ErrorStrResp(c, "proxy not allowed", 403)
+		common.ErrorI18n(c, "down.proxy_not_allowed", 403)
 		return
 	}
 }

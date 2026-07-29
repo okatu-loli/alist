@@ -1,0 +1,32 @@
+{
+  "id": "cn.alist.123open",
+  "name": { "en": "123 Open", "zh": "123 云盘" },
+  "version": "0.1.0",
+  "core_api": "^0.1.0",
+  "kinds": ["StorageDriver"],
+  "capabilities": ["Mkdir", "Move", "Rename", "Remove", "Put", "PutRapid"],
+  "provenance": {
+    "source": "community",
+    "license": "AGPL-3.0",
+    "source_url": "https://github.com/alist-org/alist",
+    "pricing": "free"
+  },
+  "permissions": { "network": ["open-api.123pan.com"] },
+  "wizard": {
+    "steps": [
+      { "id": "welcome", "type": "info", "title": { "en": "Install 123 Open", "zh": "安装 123 云盘" }, "body": { "en": "This installs the 123 Open storage driver. After installing, add a storage with your 123 Open credentials.", "zh": "这将安装 123 云盘存储驱动。安装后,在「添加存储」里填入你的 123 开放平台凭证即可挂载。" } },
+      { "id": "done", "type": "done", "title": { "en": "Done", "zh": "完成" } }
+    ]
+  },
+  "info": {
+    "config": { "name": "123 Open", "default_root": "0" },
+    "additional": [
+      { "name": "client_id", "type": "string", "required": true, "help": "123 open platform Client ID" },
+      { "name": "client_secret", "type": "password", "required": true, "help": "123 open platform Client Secret" },
+      { "name": "private_key", "type": "password", "help": "Optional signing private key" },
+      { "name": "uid", "type": "number", "help": "User ID" },
+      { "name": "valid_duration", "type": "number", "default": "30", "help": "minutes" },
+      { "name": "root_folder_id", "type": "string", "default": "0", "help": "Root folder ID" }
+    ]
+  }
+}

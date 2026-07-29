@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+import "host.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// FileDecoratorService mirrors ext.FileDecorator (design §2.6, W9a): supplies
+// the extension field group(s) behind a FileColumn contribution (label badges,
+// share markers). Mirrors EventHookService (eventhook.proto) one Kind over,
+// including the reverse-host InitHost bridge (F0/SP6).
+//
+// There is no separate "Groups" RPC: the groups a decorator provides are the
+// FieldGroup values it declared in its own manifest's
+// Contributions.FileColumns (already carried by GetManifest), so the host-side
+// client derives ext.FileDecorator.Groups() from the manifest it already loaded
+// rather than a second round trip.
+service FileDecoratorService {
+  // GetManifest is the handshake: the manifest the host validates the
+  // declared FileColumns against, and the source of the client-side Groups().
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // Decorate computes one field group over a batch of refs
+  // (ext.FileDecorator.Decorate). values_json is the returned map[string]any
+  // (RefKey -> field value) marshaled as JSON — the value shape is opaque to
+  // the host, so JSON is the wire encoding rather than a typed message
+  // (mirrors Action's args_json/result_json).
+  rpc Decorate(DecorateRequest) returns (DecorateReply);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id it
+  // passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+message DecorateRequest {
+  string group = 1;
+  repeated ObjRef refs = 2;
+}
+
+message DecorateReply {
+  // values_json is Decorate's returned map[string]any marshaled as JSON.
+  bytes values_json = 1;
+  ErrorProto error = 2;
+}

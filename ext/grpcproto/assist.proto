@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// AssistService mirrors ext.Assist: any Kind's plugin whose impl also
+// implements ext.Assist runs the field-level assist forms it declared
+// (Contributions.AssistForms) when the host submits one on the user's
+// behalf. Deliberately no GetManifest RPC — the manifest handshake already
+// happens on the plugin's primary Kind service (ActionService,
+// DriverService, ...); "assist" is an auxiliary dispense name that rides
+// along with whichever Kind the same impl value serves, mirrors
+// ActionService one field over (form_id instead of action_id).
+service AssistService {
+  // Assist runs the form named by form_id (ext.Assist.Assist). input_json is
+  // the caller's opaque input map marshaled as JSON; result_json is
+  // whatever Assist returned, marshaled the same way — neither shape is
+  // known to the host, so JSON is the wire encoding rather than a typed
+  // message.
+  rpc Assist(AssistRequest) returns (AssistReply);
+
+  // Reverse host bridge (F0/SP6). ext.Assist carries no Init hook of its own
+  // (it does not embed Extension), so whether this RPC does anything
+  // depends on whether the impl value also happens to implement
+  // ext.Extension: when it does (the common case — the same value serves
+  // both the plugin's primary Kind and Assist), the plugin-side handler
+  // dials back into the host's HostService on the given broker id and calls
+  // impl.Init with a working ext.Host, exactly like every other Kind's
+  // InitHost — this matters in particular for a dedicated assist-only
+  // subprocess (host.LaunchAssist), where no other dispense ever Init's the
+  // impl, so this is the only place it happens. When the impl is not an
+  // ext.Extension, the handler is a no-op and Assist runs without ever
+  // having been handed a Host.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+message AssistRequest {
+  // principal is the host-issued identity handle of the acting user
+  // (ext.Principal); empty means the plugin's own bound identity.
+  string principal = 1;
+  string form_id = 2;
+  // input_json is the caller's input map[string]any marshaled as JSON.
+  bytes input_json = 3;
+}
+
+message AssistReply {
+  // result_json is Assist's returned value (any) marshaled as JSON.
+  bytes result_json = 1;
+  ErrorProto error = 2;
+}

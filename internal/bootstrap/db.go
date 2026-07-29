@@ -7,8 +7,11 @@ import (
 	"time"
 
 	"github.com/alist-org/alist/v3/cmd/flags"
+	"github.com/alist-org/alist/v3/internal/auth/tokenstore"
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/db"
+	"github.com/alist-org/alist/v3/internal/db/migration"
+	"github.com/alist-org/alist/v3/internal/i18n"
 	log "github.com/sirupsen/logrus"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -86,4 +89,22 @@ func InitDB() {
 		log.Fatalf("failed to connect database:%s", err.Error())
 	}
 	db.Init(dB)
+	switch flags.MigrateMode {
+	case "auto":
+		if err := migration.New(dB, conf.Conf.Database.TablePrefix).Up(); err != nil {
+			log.Fatal(i18n.Log("log.migration_failed", "error", fmt.Sprintf("%+v", err)))
+		}
+	case "off":
+		// admin drives schema via `alist migrate`
+	case "legacy":
+		if err := migration.GuardLegacyAutoMigrate(dB, conf.Conf.Database.TablePrefix); err != nil {
+			log.Fatalf("%+v", err)
+		}
+		if err := db.LegacyAutoMigrate(); err != nil {
+			log.Fatalf("failed legacy automigrate: %+v", err)
+		}
+	default:
+		log.Fatalf("invalid --migrate-mode %q (want auto | off | legacy)", flags.MigrateMode)
+	}
+	tokenstore.Init(tokenstore.NewSQLiteStore())
 }

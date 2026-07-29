@@ -11,7 +11,7 @@ import (
 // PR AlistGo/alist#7817.
 func GrantAdminPermissions() {
 	admin, err := op.GetAdmin()
-	if err == nil && (admin.Permission & 0x33FF) == 0 {
+	if err == nil && (admin.Permission&0x33FF) == 0 {
 		admin.Permission |= 0x33FF
 		err = op.UpdateUser(admin)
 	}

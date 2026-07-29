@@ -9,9 +9,8 @@ import (
 	"time"
 )
 
-const tokenURL = ApiBaseURL + ApiToken
-
 type tokenManager struct {
+	baseURL      string
 	clientID     string
 	clientSecret string
 
@@ -20,8 +19,9 @@ type tokenManager struct {
 	expireTime  time.Time
 }
 
-func newTokenManager(clientID, clientSecret string) *tokenManager {
+func newTokenManager(baseURL, clientID, clientSecret string) *tokenManager {
 	return &tokenManager{
+		baseURL:      baseURL,
 		clientID:     clientID,
 		clientSecret: clientSecret,
 	}
@@ -40,7 +40,7 @@ func (tm *tokenManager) getToken() (string, error) {
 		"clientSecret": tm.clientSecret,
 	}
 	body, _ := json.Marshal(reqBody)
-	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", tm.baseURL+ApiToken, bytes.NewBuffer(body))
 	if err != nil {
 		return "", err
 	}

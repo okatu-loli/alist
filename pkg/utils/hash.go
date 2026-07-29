@@ -57,6 +57,17 @@ var (
 	Supported  []*HashType
 )
 
+// GetHashByName looks up a registered HashType by its wire/registration name
+// (e.g. "md5", the key HashInfo.String()/FromString and the ext plugin bridge
+// use), returning nil if no such hash is registered. Lets callers that only
+// have a wire name (like the plugin bridge's hashesFromMap) look up the
+// HashType directly instead of round-tripping through FromString's
+// json.Marshal/Unmarshal + full-map decode just to resolve one or a few
+// names.
+func GetHashByName(name string) *HashType {
+	return name2hash[name]
+}
+
 // RegisterHash adds a new Hash to the list and returns its Type
 func RegisterHash(name, alias string, width int, newFunc func() hash.Hash) *HashType {
 	return RegisterHashWithParam(name, alias, width, func(a ...any) hash.Hash { return newFunc() })
@@ -180,9 +191,10 @@ func (m *MultiHasher) Size() int64 {
 	return m.size
 }
 
-// A HashInfo contains hash string for one or more hashType
+// A HashInfo contains hash string for one or more hashType.
+// The field is unexported: serialization goes through String()/Export().
 type HashInfo struct {
-	h map[*HashType]string `json:"hashInfo"`
+	h map[*HashType]string
 }
 
 func NewHashInfoByMap(h map[*HashType]string) HashInfo {

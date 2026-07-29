@@ -4,10 +4,12 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/device"
 	"github.com/alist-org/alist/v3/internal/errs"
+	"github.com/alist-org/alist/v3/internal/extension"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/internal/setting"
@@ -21,7 +23,7 @@ import (
 // if token is empty, set user to guest
 func Auth(c *gin.Context) {
 	token := c.GetHeader("Authorization")
-	if subtle.ConstantTimeCompare([]byte(token), []byte(setting.GetStr(conf.Token))) == 1 {
+	if adminTokenMatches(token) {
 		admin, err := op.GetAdmin()
 		if err != nil {
 			common.ErrorResp(c, err, 500)
@@ -43,7 +45,7 @@ func Auth(c *gin.Context) {
 			return
 		}
 		if guest.Disabled {
-			common.ErrorStrResp(c, "Guest user is disabled, login please", 401)
+			common.ErrorI18n(c, "auth.guest_disabled", 401)
 			c.Abort()
 			return
 		}
@@ -63,6 +65,24 @@ func Auth(c *gin.Context) {
 		c.Next()
 		return
 	}
+	// Extension scoped token (Step 10): a short-lived machine credential that
+	// authenticates as a synthetic principal restricted to the declared storage
+	// paths. Recognized before the normal bearer path and only for scoped-shaped
+	// tokens; it carries no device session (it is not a login), so it skips
+	// HandleSession and just becomes the request principal — op.Authorize then
+	// confines it to scope.
+	if extension.IsScopedToken(token) {
+		user, err := extension.AuthenticateScopedToken(token)
+		if err != nil {
+			common.ErrorResp(c, err, 401)
+			c.Abort()
+			return
+		}
+		c.Set(ctxkey.User, user)
+		log.Debugf("use extension scoped token: %+v", user)
+		c.Next()
+		return
+	}
 	userClaims, err := common.ParseToken(token)
 	if err != nil {
 		common.ErrorResp(c, err, 401)
@@ -77,12 +97,12 @@ func Auth(c *gin.Context) {
 	}
 	// validate password timestamp
 	if userClaims.PwdTS != user.PwdTS {
-		common.ErrorStrResp(c, "Password has been changed, login please", 401)
+		common.ErrorI18n(c, "auth.password_changed", 401)
 		c.Abort()
 		return
 	}
 	if user.Disabled {
-		common.ErrorStrResp(c, "Current user is disabled, replace please", 401)
+		common.ErrorI18n(c, "auth.current_user_disabled_relogin", 401)
 		c.Abort()
 		return
 	}
@@ -100,6 +120,24 @@ func Auth(c *gin.Context) {
 	}
 	log.Debugf("use login token: %+v", user)
 	c.Next()
+}
+
+// adminTokenMatches reports whether the request's Authorization header is
+// the current admin API token (conf.Token). Storage mode
+// (conf.TokenPlaintext) decides how the comparison happens: plaintext
+// installs still compare raw bytes in constant time (unchanged from before
+// hashing existed); hashed installs verify against the salted digest via
+// utils.VerifyToken. An empty header never matches either branch — the
+// stored token is always non-empty (random.Token()/SetToken's required
+// field), and utils.VerifyToken rejects the malformed/empty stored shape —
+// so this preserves the existing "empty token never authenticates as admin"
+// behavior and instead falls through to the guest/login paths below.
+func adminTokenMatches(token string) bool {
+	stored := setting.GetStr(conf.Token)
+	if setting.GetBool(conf.TokenPlaintext) {
+		return subtle.ConstantTimeCompare([]byte(token), []byte(stored)) == 1
+	}
+	return utils.VerifyToken(stored, token)
 }
 
 // HandleSession verifies device sessions and stores context values.
@@ -120,82 +158,15 @@ func HandleSession(c *gin.Context, user *model.User) bool {
 		c.Abort()
 		return false
 	}
-	c.Set("device_key", key)
-	c.Set("user", user)
+	c.Set(ctxkey.DeviceKey, key)
+	c.Set(ctxkey.User, user)
 	return true
 }
 
-func Authn(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if subtle.ConstantTimeCompare([]byte(token), []byte(setting.GetStr(conf.Token))) == 1 {
-		admin, err := op.GetAdmin()
-		if err != nil {
-			common.ErrorResp(c, err, 500)
-			c.Abort()
-			return
-		}
-		c.Set("user", admin)
-		log.Debugf("use admin token: %+v", admin)
-		c.Next()
-		return
-	}
-	if token == "" {
-		guest, err := op.GetGuest()
-		if err != nil {
-			common.ErrorResp(c, err, 500)
-			c.Abort()
-			return
-		}
-		c.Set("user", guest)
-		log.Debugf("use empty token: %+v", guest)
-		c.Next()
-		return
-	}
-	userClaims, err := common.ParseToken(token)
-	if err != nil {
-		common.ErrorResp(c, err, 401)
-		c.Abort()
-		return
-	}
-	user, err := op.GetUserByName(userClaims.Username)
-	if err != nil {
-		common.ErrorResp(c, err, 401)
-		c.Abort()
-		return
-	}
-	// validate password timestamp
-	if userClaims.PwdTS != user.PwdTS {
-		common.ErrorStrResp(c, "Password has been changed, login please", 401)
-		c.Abort()
-		return
-	}
-	if user.Disabled {
-		common.ErrorStrResp(c, "Current user is disabled, replace please", 401)
-		c.Abort()
-		return
-	}
-	if len(user.Role) > 0 {
-		var roles []model.Role
-		for _, roleID := range user.Role {
-			role, err := op.GetRole(uint(roleID))
-			if err != nil {
-				common.ErrorStrResp(c, fmt.Sprintf("load role %d failed", roleID), 500)
-				c.Abort()
-				return
-			}
-			roles = append(roles, *role)
-		}
-		user.RolesDetail = roles
-	}
-	c.Set("user", user)
-	log.Debugf("use login token: %+v", user)
-	c.Next()
-}
-
 func AuthNotGuest(c *gin.Context) {
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	if user.IsGuest() {
-		common.ErrorStrResp(c, "You are a guest", 403)
+		common.ErrorI18n(c, "auth.you_are_guest", 403)
 		c.Abort()
 	} else {
 		c.Next()
@@ -203,9 +174,9 @@ func AuthNotGuest(c *gin.Context) {
 }
 
 func AuthAdmin(c *gin.Context) {
-	user := c.MustGet("user").(*model.User)
+	user := c.MustGet(ctxkey.User).(*model.User)
 	if !user.IsAdmin() {
-		common.ErrorStrResp(c, "You are not an admin", 403)
+		common.ErrorI18n(c, "auth.you_are_not_admin", 403)
 		c.Abort()
 	} else {
 		c.Next()

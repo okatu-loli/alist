@@ -1,0 +1,9 @@
+package main
+
+import (
+	"github.com/AlistGo/alist-ext/grpcplugin"
+)
+
+func main() {
+	grpcplugin.Serve(newDemoDriver())
+}

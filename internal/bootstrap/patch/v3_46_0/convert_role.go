@@ -14,6 +14,15 @@ import (
 
 // ConvertLegacyRoles migrates old integer role values to a new role model with permission scopes.
 func ConvertLegacyRoles() {
+	// Only act when a legacy int-valued role column is actually present.
+	// Dev builds (version without "v" prefix) run every patch on every boot,
+	// so without this guard a fresh v4 database would get a stray "general"
+	// role forced at a pinned id — colliding with the preset roles that
+	// legitimately own the low auto-increment ids (observed as a UNIQUE
+	// constraint error on x_roles.id at every startup).
+	if !IsLegacyRoleDetected() {
+		return
+	}
 	guestRole, err := op.GetRoleByName("guest")
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -65,8 +74,10 @@ func ConvertLegacyRoles() {
 	generalRole, err := op.GetRoleByName("general")
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// No pinned ID: the legacy→new mapping below uses generalRole.ID,
+			// so an auto-assigned id is fine — and NEWGENERAL(3) may already be
+			// taken by a preset role on databases seeded before this patch ran.
 			generalRole = &model.Role{
-				ID:          uint(model.NEWGENERAL),
 				Name:        "general",
 				Description: "General User",
 				PermissionScopes: []model.PermissionEntry{

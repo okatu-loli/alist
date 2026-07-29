@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// ActionService mirrors ext.Action (W8b): a Kind=Action plugin runs the menu
+// actions it declared in Contributions.MenuActions when the host invokes them
+// on the user's behalf. Mirrors AuthProviderService (auth.proto) one Kind
+// over, including the reverse-host InitHost bridge (F0/SP6).
+service ActionService {
+  // GetManifest is the handshake: the manifest the host validates the
+  // declared MenuActions against.
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // Invoke runs the action named by action_id (ext.Action.Invoke). args_json
+  // is the caller's opaque args map marshaled as JSON; result_json is
+  // whatever Invoke returned, marshaled the same way — neither shape is
+  // known to the host, so JSON is the wire encoding rather than a typed
+  // message.
+  rpc Invoke(InvokeRequest) returns (InvokeReply);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id it
+  // passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+message InvokeRequest {
+  // principal is the host-issued identity handle of the acting user
+  // (ext.Principal); empty means the plugin's own bound identity.
+  string principal = 1;
+  string action_id = 2;
+  // args_json is the caller's args map[string]any marshaled as JSON.
+  bytes args_json = 3;
+}
+
+message InvokeReply {
+  // result_json is Invoke's returned value (any) marshaled as JSON.
+  bytes result_json = 1;
+  ErrorProto error = 2;
+}

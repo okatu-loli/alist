@@ -24,7 +24,7 @@ func StoragesLoaded(c *gin.Context) {
 				return
 			}
 		}
-		common.ErrorStrResp(c, "Loading storage, please wait", 500)
+		common.ErrorI18n(c, "middleware.storages_loading", 500)
 		c.Abort()
 	}
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/pkg/errors"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -66,4 +67,26 @@ func ListSessions() ([]model.Session, error) {
 
 func MarkInactive(sessionID string) error {
 	return errors.WithStack(db.Model(&model.Session{}).Where("device_key = ?", sessionID).Update("status", model.SessionInactive).Error)
+}
+
+// MarkInactiveAndRevokeTokens flips a session to inactive and revokes every
+// token issued for it in a single transaction, so a crash or error between
+// the two writes can never leave "session inactive but its tokens still
+// live" — the failure mode MarkInactive's two independent calls used to
+// allow. It writes the tokens table directly rather than going through the
+// tokenstore.Store interface: on this skeleton tokens live in this same
+// gorm db (see tokenstore.SQLiteStore.RevokeBySession, which does the exact
+// same update), so bypassing the interface costs nothing and buys
+// atomicity. If a non-db-backed Store (e.g. redis) is ever wired in, this
+// function stops being equivalent to "mark + store.RevokeBySession" and the
+// caller needs to revisit how the two are kept in sync.
+func MarkInactiveAndRevokeTokens(sessionID string) error {
+	return errors.WithStack(db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Session{}).Where("device_key = ?", sessionID).
+			Update("status", model.SessionInactive).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.Token{}).Where("session_id = ?", sessionID).
+			Update("revoked", true).Error
+	}))
 }

@@ -2,12 +2,14 @@ package _123Open
 
 import (
 	"fmt"
-	"github.com/go-resty/resty/v2"
 	"net/http"
+
+	"github.com/go-resty/resty/v2"
 )
 
 const (
-	// baseurl
+	// ApiBaseURL is the default 123 open platform host. It is not a driver
+	// Addition field; tests override it via the unexported Open123.apiBase.
 	ApiBaseURL = "https://open-api.123pan.com"
 
 	// auth
@@ -131,6 +133,15 @@ type UploadCompleteData struct {
 	Completed bool `json:"completed"`
 }
 
+// baseURL returns the API host for this driver instance, falling back to the
+// production default when unset.
+func (d *Open123) baseURL() string {
+	if d.apiBase != "" {
+		return d.apiBase
+	}
+	return ApiBaseURL
+}
+
 func (d *Open123) Request(endpoint string, method string, setup func(*resty.Request), result any) (*resty.Response, error) {
 	client := resty.New()
 	token, err := d.tm.getToken()
@@ -150,11 +161,11 @@ func (d *Open123) Request(endpoint string, method string, setup func(*resty.Requ
 
 	switch method {
 	case http.MethodGet:
-		return req.Get(ApiBaseURL + endpoint)
+		return req.Get(d.baseURL() + endpoint)
 	case http.MethodPost:
-		return req.Post(ApiBaseURL + endpoint)
+		return req.Post(d.baseURL() + endpoint)
 	case http.MethodPut:
-		return req.Put(ApiBaseURL + endpoint)
+		return req.Put(d.baseURL() + endpoint)
 	default:
 		return nil, fmt.Errorf("unsupported method: %s", method)
 	}

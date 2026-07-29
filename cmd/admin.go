@@ -59,6 +59,15 @@ var ShowTokenCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		Init()
 		defer Release()
+		// In hash mode the stored value is a salted digest, not a usable token —
+		// printing it would just be noise. Only plaintext-storage mode can show
+		// the real token (see conf.TokenPlaintext, added with token hashing).
+		if !setting.GetBool(conf.TokenPlaintext) {
+			utils.Log.Infof("Admin token is stored hashed and cannot be shown. " +
+				"Generate a fresh one with `admin random` or `admin set`, or use the " +
+				"admin panel's token management to (re)store it in plaintext.")
+			return
+		}
 		token := setting.GetStr(conf.Token)
 		utils.Log.Infof("Admin token: %s", token)
 	},

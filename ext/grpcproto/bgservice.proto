@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// BackgroundServiceService mirrors ext.BackgroundService: a Kind=BackgroundService
+// plugin runs a long-lived task inside its own process (an FRP-style tunnel, a
+// scheduled sync, a watcher). The host owns its lifecycle — Start/Stop — and
+// polls Status for liveness and metrics, but never sits in the data path.
+service BackgroundServiceService {
+  // GetManifest is the handshake: the manifest the host builds its integration
+  // from. driver_config_json is unused by BackgroundService (empty).
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // Start begins the background task; idempotent when already running.
+  rpc Start(Empty) returns (ErrorReply);
+  // Stop halts the background task; idempotent when already stopped.
+  rpc Stop(Empty) returns (ErrorReply);
+  // Status reports the current lifecycle state, a human-readable detail, and
+  // plugin-specific metrics (JSON) for the host to surface.
+  rpc Status(Empty) returns (StatusReply);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id it
+  // passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+message StatusReply {
+  string state = 1;
+  string detail = 2;
+  bytes metrics_json = 3;
+  ErrorProto error = 4;
+}

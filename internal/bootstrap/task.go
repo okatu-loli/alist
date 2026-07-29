@@ -1,12 +1,14 @@
 package bootstrap
 
 import (
+	"time"
+
 	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/db"
 	"github.com/alist-org/alist/v3/internal/fs"
-	"github.com/alist-org/alist/v3/internal/offline_download/tool"
 	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/internal/setting"
+	"github.com/alist-org/alist/v3/internal/task"
 	"github.com/xhofe/tache"
 )
 
@@ -18,43 +20,98 @@ func taskFilterNegative(num int) int64 {
 }
 
 func InitTaskManager() {
-	fs.UploadTaskManager = tache.NewManager[*fs.UploadTask](tache.WithWorks(setting.GetInt(conf.TaskUploadThreadsNum, conf.Conf.Tasks.Upload.Workers)), tache.WithMaxRetry(conf.Conf.Tasks.Upload.MaxRetry)) //upload will not support persist
+	// bootstrap.LoadStorages() (called before this) only *starts* loading
+	// storages -- it hands the work off to a goroutine and returns
+	// immediately, flipping conf.StoragesLoaded once every storage has
+	// finished (see storage.go and server/middlewares.StoragesLoaded, which
+	// gates the fs API on the same flag). A recovered Copy/Move/Upload task
+	// re-resolves its storage by mount path the moment it runs
+	// (op.GetStorageByMountPath), so building these managers running -- which
+	// dispatches every recovered task to a worker synchronously, before
+	// InitTaskManager even returns -- races that goroutine: whichever
+	// storages haven't finished registering yet make every task that needs
+	// them fail with "no mount path for a storage", burning through
+	// MaxRetry and landing in StateFailed instead of resuming. So every
+	// manager below starts paused (tache.WithRunning(false)): recovery still
+	// loads and queues tasks immediately, but startTaskManagersOnStoragesLoaded
+	// only lets them actually run once conf.StoragesLoaded is true.
+	uploadOpts := []tache.Option{tache.WithWorks(setting.GetInt(conf.TaskUploadThreadsNum, conf.Conf.Tasks.Upload.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("upload", conf.Conf.Tasks.Upload.TaskPersistant), db.UpdateTaskDataFunc("upload", conf.Conf.Tasks.Upload.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Upload.MaxRetry), tache.WithRunning(false)}
+	// task.AssertPersistDebounceAsync guards the invariant TaskExtension's
+	// locked Set* methods depend on (see its doc comment in
+	// internal/task/base.go's mu field): none of the options above pass
+	// tache.WithOptions (the only Option that can null tache's default
+	// PersistDebounce back out), but re-run tache's own option resolution
+	// against this exact slice so a future change that did would panic here
+	// at boot instead of deadlocking silently under load.
+	task.AssertPersistDebounceAsync(uploadOpts...)
+	fs.UploadTaskManager = tache.NewManager[*fs.UploadTask](uploadOpts...)
 	op.RegisterSettingChangingCallback(func() {
 		fs.UploadTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskUploadThreadsNum, conf.Conf.Tasks.Upload.Workers)))
 	})
-	fs.CopyTaskManager = tache.NewManager[*fs.CopyTask](tache.WithWorks(setting.GetInt(conf.TaskCopyThreadsNum, conf.Conf.Tasks.Copy.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("copy", conf.Conf.Tasks.Copy.TaskPersistant), db.UpdateTaskDataFunc("copy", conf.Conf.Tasks.Copy.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Copy.MaxRetry))
+	fs.ReconcileUploadPersistTempDir()
+	copyOpts := []tache.Option{tache.WithWorks(setting.GetInt(conf.TaskCopyThreadsNum, conf.Conf.Tasks.Copy.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("copy", conf.Conf.Tasks.Copy.TaskPersistant), db.UpdateTaskDataFunc("copy", conf.Conf.Tasks.Copy.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Copy.MaxRetry), tache.WithRunning(false)}
+	task.AssertPersistDebounceAsync(copyOpts...)
+	fs.CopyTaskManager = tache.NewManager[*fs.CopyTask](copyOpts...)
 	op.RegisterSettingChangingCallback(func() {
 		fs.CopyTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskCopyThreadsNum, conf.Conf.Tasks.Copy.Workers)))
 	})
-	tool.DownloadTaskManager = tache.NewManager[*tool.DownloadTask](tache.WithWorks(setting.GetInt(conf.TaskOfflineDownloadThreadsNum, conf.Conf.Tasks.Download.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("download", conf.Conf.Tasks.Download.TaskPersistant), db.UpdateTaskDataFunc("download", conf.Conf.Tasks.Download.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Download.MaxRetry))
+	// move reuses the copy task manager's worker/retry/persist configuration
+	// (no separate move conf); it's a distinct manager since it holds *fs.MoveTask.
+	moveOpts := []tache.Option{tache.WithWorks(setting.GetInt(conf.TaskCopyThreadsNum, conf.Conf.Tasks.Copy.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("move", conf.Conf.Tasks.Copy.TaskPersistant), db.UpdateTaskDataFunc("move", conf.Conf.Tasks.Copy.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Copy.MaxRetry), tache.WithRunning(false)}
+	task.AssertPersistDebounceAsync(moveOpts...)
+	fs.MoveTaskManager = tache.NewManager[*fs.MoveTask](moveOpts...)
 	op.RegisterSettingChangingCallback(func() {
-		tool.DownloadTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskOfflineDownloadThreadsNum, conf.Conf.Tasks.Download.Workers)))
+		fs.MoveTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskCopyThreadsNum, conf.Conf.Tasks.Copy.Workers)))
 	})
-	tool.TransferTaskManager = tache.NewManager[*tool.TransferTask](tache.WithWorks(setting.GetInt(conf.TaskOfflineDownloadTransferThreadsNum, conf.Conf.Tasks.Transfer.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("transfer", conf.Conf.Tasks.Transfer.TaskPersistant), db.UpdateTaskDataFunc("transfer", conf.Conf.Tasks.Transfer.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Transfer.MaxRetry))
-	op.RegisterSettingChangingCallback(func() {
-		tool.TransferTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskOfflineDownloadTransferThreadsNum, conf.Conf.Tasks.Transfer.Workers)))
-	})
-	if len(tool.TransferTaskManager.GetAll()) == 0 { //prevent offline downloaded files from being deleted
-		CleanTempDir()
-	}
-	workers := conf.Conf.Tasks.S3Transition.Workers
-	if workers < 0 {
-		workers = 0
-	}
-	fs.S3TransitionTaskManager = tache.NewManager[*fs.S3TransitionTask](
-		tache.WithWorks(workers),
-		tache.WithPersistFunction(
-			db.GetTaskDataFunc("s3_transition", conf.Conf.Tasks.S3Transition.TaskPersistant),
-			db.UpdateTaskDataFunc("s3_transition", conf.Conf.Tasks.S3Transition.TaskPersistant),
-		),
-		tache.WithMaxRetry(conf.Conf.Tasks.S3Transition.MaxRetry),
+	CleanTempDir()
+	go startTaskManagersOnStoragesLoaded(
+		taskFilterNegative(setting.GetInt(conf.TaskUploadThreadsNum, conf.Conf.Tasks.Upload.Workers)),
+		taskFilterNegative(setting.GetInt(conf.TaskCopyThreadsNum, conf.Conf.Tasks.Copy.Workers)),
 	)
-	fs.ArchiveDownloadTaskManager = tache.NewManager[*fs.ArchiveDownloadTask](tache.WithWorks(setting.GetInt(conf.TaskDecompressDownloadThreadsNum, conf.Conf.Tasks.Decompress.Workers)), tache.WithPersistFunction(db.GetTaskDataFunc("decompress", conf.Conf.Tasks.Decompress.TaskPersistant), db.UpdateTaskDataFunc("decompress", conf.Conf.Tasks.Decompress.TaskPersistant)), tache.WithMaxRetry(conf.Conf.Tasks.Decompress.MaxRetry))
-	op.RegisterSettingChangingCallback(func() {
-		fs.ArchiveDownloadTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskDecompressDownloadThreadsNum, conf.Conf.Tasks.Decompress.Workers)))
-	})
-	fs.ArchiveContentUploadTaskManager.Manager = tache.NewManager[*fs.ArchiveContentUploadTask](tache.WithWorks(setting.GetInt(conf.TaskDecompressUploadThreadsNum, conf.Conf.Tasks.DecompressUpload.Workers)), tache.WithMaxRetry(conf.Conf.Tasks.DecompressUpload.MaxRetry)) //decompress upload will not support persist
-	op.RegisterSettingChangingCallback(func() {
-		fs.ArchiveContentUploadTaskManager.SetWorkersNumActive(taskFilterNegative(setting.GetInt(conf.TaskDecompressUploadThreadsNum, conf.Conf.Tasks.DecompressUpload.Workers)))
-	})
+}
+
+// startTaskManagersOnStoragesLoaded blocks (in its own goroutine, so it
+// never delays server startup -- the same tradeoff LoadStorages itself
+// already makes) until every storage has finished loading, then starts the
+// three task managers InitTaskManager built paused. Polling
+// conf.StoragesLoaded matches how the rest of the codebase observes storage
+// readiness (see server/middlewares.StoragesLoaded); there's no existing
+// signal/channel for "storages finished loading" to select on instead.
+func startTaskManagersOnStoragesLoaded(uploadWorkers, copyWorkers int64) {
+	for !conf.StoragesLoaded {
+		time.Sleep(50 * time.Millisecond)
+	}
+	startPausedManager(fs.UploadTaskManager, uploadWorkers)
+	startPausedManager(fs.CopyTaskManager, copyWorkers)
+	startPausedManager(fs.MoveTaskManager, copyWorkers)
+}
+
+// startPausedManager starts a manager built with tache.WithRunning(false)
+// and gets it back up to full configured concurrency, not just one task at
+// a time. Manager.Start sets running=true and calls its (unexported) next()
+// exactly once, which claims a single worker and dispatches a single queued
+// task; every other worker sits idle until that one task's own completion
+// chains into the next next() call, and so on -- so naively calling Start
+// alone on a manager recovered with many queued tasks would silently cap it
+// at concurrency 1 forever (nothing else ever calls next() enough times to
+// claim the rest of the pool). Dropping active workers to 0 first makes
+// Start's single dispatch attempt a no-op.
+//
+// Bumping straight to the target with one SetWorkersNumActive(active) call
+// mostly works -- that's the same call
+// op.RegisterSettingChangingCallback above already relies on -- but its loop
+// (in the vendored tache library) re-checks the *live* queue length on every
+// iteration, which shrinks by one each time it dispatches a task. When the
+// jump is large relative to how many tasks are actually queued (recovering
+// with fewer pending tasks than workers, or draining near the end of a
+// batch), that shrinking bound trips early and silently under-dispatches.
+// Requesting the increase one worker at a time instead keeps each call's
+// jump at exactly 1, which the shrinking bound can never cut short as long
+// as at least one task remains queued.
+func startPausedManager[T tache.Task](m *tache.Manager[T], active int64) {
+	m.SetWorkersNumActive(0)
+	m.Start()
+	for i := int64(1); i <= active; i++ {
+		m.SetWorkersNumActive(i)
+	}
 }

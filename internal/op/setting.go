@@ -152,17 +152,31 @@ func GetSettingItemsInGroups(groups []int) ([]model.SettingItem, error) {
 	return items, err
 }
 
+// SaveSettingItems validates + persists a batch of settings. Its returned
+// error, if any, is re-wrapped as a SettingValidationError (see hook.go) IFF
+// EVERY individual failure across the batch was itself a validation error —
+// utils.MergeErrors below flattens the underlying error slice into one plain
+// `errors.New`, which loses the wrapping needed for errors.As, so that
+// tracking has to happen HERE, before the merge, not after it. A batch
+// containing even one genuine db failure (alongside zero or more validation
+// failures) is deliberately NOT reported as a validation error — callers
+// (server/handles/setting.go) must still see that as a 500, not a 400.
 func SaveSettingItems(items []model.SettingItem) error {
 	noHookItems := make([]model.SettingItem, 0)
 	errs := make([]error, 0)
+	onlyValidationErrs := true
 	for i := range items {
 		if ok, err := HandleSettingItemHook(&items[i]); ok {
 			if err != nil {
 				errs = append(errs, err)
+				if !IsSettingValidationError(err) {
+					onlyValidationErrs = false
+				}
 			} else {
 				err = db.SaveSettingItem(&items[i])
 				if err != nil {
 					errs = append(errs, err)
+					onlyValidationErrs = false
 				}
 			}
 		} else {
@@ -173,12 +187,17 @@ func SaveSettingItems(items []model.SettingItem) error {
 		err := db.SaveSettingItems(noHookItems)
 		if err != nil {
 			errs = append(errs, err)
+			onlyValidationErrs = false
 		}
 	}
 	if len(errs) < len(items)-len(noHookItems)+1 {
 		SettingCacheUpdate()
 	}
-	return utils.MergeErrors(errs...)
+	merged := utils.MergeErrors(errs...)
+	if merged != nil && onlyValidationErrs {
+		return newSettingValidationError(merged)
+	}
+	return merged
 }
 
 func SaveSettingItem(item *model.SettingItem) (err error) {

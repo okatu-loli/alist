@@ -1,0 +1,19 @@
+# Crowdin sync config. Credentials are NEVER hardcoded here — the CLI/Action
+# reads them from CROWDIN_PROJECT_ID / CROWDIN_PERSONAL_TOKEN (repo secrets,
+# wired in .github/workflows/crowdin.yml).
+"project_id_env": "CROWDIN_PROJECT_ID"
+"api_token_env": "CROWDIN_PERSONAL_TOKEN"
+"base_path": "."
+
+"preserve_hierarchy": true
+
+"files": [
+  {
+    # en.json is the Crowdin source language; zh-CN.json is a locally
+    # maintained translation that gets pushed alongside it. Every other
+    # language lives only on Crowdin and is pulled back separately — the
+    # backend renders English at runtime for anything not present here.
+    "source": "/internal/i18n/locales/en.json",
+    "translation": "/internal/i18n/locales/%locale%.json"
+  }
+]

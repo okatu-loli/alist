@@ -1,435 +1,225 @@
 package handles
 
 import (
-	"encoding/json"
-	"fmt"
-	"github.com/alist-org/alist/v3/internal/task"
-	"net/url"
+	"errors"
+	"mime"
+	"net/http"
 	stdpath "path"
 
-	"github.com/alist-org/alist/v3/internal/archive/tool"
-	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/archive"
+	"github.com/alist-org/alist/v3/internal/ctxkey"
 	"github.com/alist-org/alist/v3/internal/errs"
-	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/internal/op"
-	"github.com/alist-org/alist/v3/internal/setting"
-	"github.com/alist-org/alist/v3/internal/sign"
-	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/common"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 )
 
+// Archive browsing (internal/archive): let a caller look inside an archive
+// file they can already read, without downloading the whole thing first.
+// Format support is dispatched by file extension against every registered
+// Kind=ArchiveTool (the built-in zip tool, plus any installed plugin adding
+// rar/7z/...) -- see internal/extension.FindArchiveToolForExt; a path whose
+// extension nothing claims behaves like any other unsupported format.
+// op.Authorize(ActRead) on the archive's own path (enforced inside
+// internal/archive) is the sole access boundary, mirroring every other fs.*
+// handler and internal/thumbnail. Meta/List return the usual 200+JSON
+// envelope (common.SuccessResp/ErrorResp -- the JSON `code` field carries the
+// logical status, same convention as FsList/FsGet); Extract streams the
+// entry's bytes with a REAL HTTP status, same reasoning as FsThumb (a
+// download, not a JSON API call).
+
 type ArchiveMetaReq struct {
-	Path        string `json:"path" form:"path"`
-	Password    string `json:"password" form:"password"`
-	Refresh     bool   `json:"refresh" form:"refresh"`
-	ArchivePass string `json:"archive_pass" form:"archive_pass"`
+	Path     string `json:"path" form:"path"`
+	Password string `json:"password" form:"password"`
 }
 
-type ArchiveMetaResp struct {
-	Comment     string               `json:"comment"`
-	IsEncrypted bool                 `json:"encrypted"`
-	Content     []ArchiveContentResp `json:"content"`
-	Sort        *model.Sort          `json:"sort,omitempty"`
-	RawURL      string               `json:"raw_url"`
-	Sign        string               `json:"sign"`
-}
-
-type ArchiveContentResp struct {
-	ObjResp
-	Children []ArchiveContentResp `json:"children"`
-}
-
-func toObjsRespWithoutSignAndThumb(obj model.Obj) ObjResp {
-	storageClass, _ := model.GetStorageClass(obj)
-	return ObjResp{
-		Name:         obj.GetName(),
-		Size:         obj.GetSize(),
-		IsDir:        obj.IsDir(),
-		Modified:     obj.ModTime(),
-		Created:      obj.CreateTime(),
-		HashInfoStr:  obj.GetHash().String(),
-		HashInfo:     obj.GetHash().Export(),
-		Sign:         "",
-		Thumb:        "",
-		Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
-		StorageClass: storageClass,
-	}
-}
-
-func toContentResp(objs []model.ObjTree) []ArchiveContentResp {
-	if objs == nil {
-		return nil
-	}
-	ret, _ := utils.SliceConvert(objs, func(src model.ObjTree) (ArchiveContentResp, error) {
-		return ArchiveContentResp{
-			ObjResp:  toObjsRespWithoutSignAndThumb(src),
-			Children: toContentResp(src.GetChildren()),
-		}, nil
-	})
-	return ret
-}
-
+// FsArchiveMeta returns a zip archive's meta-info (entry count, whether any
+// entry is encrypted, total declared uncompressed size).
+// @Summary Get zip archive meta-info
+// @Description Dispatched by file extension to a registered ArchiveTool (built-in zip, or an installed plugin). op.Authorize(ActRead) on path is the sole access boundary.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Produce json
+// @Param path query string true "archive file path"
+// @Param password query string false "archive password (reserved -- unused for std zip, which cannot decrypt)"
+// @Success 200 {object} common.Resp[archive.ArchiveMeta]
+// @Failure 400 {object} common.Resp[any] "missing path"
+// @Failure 403 {object} common.Resp[any] "no read permission on path"
+// @Failure 404 {object} common.Resp[any] "not found or not a zip archive"
+// @Failure 422 {object} common.Resp[any] "zip exceeds a safety cap (entry count / total size)"
+// @Router /v4/fs/archive/meta [get]
 func FsArchiveMeta(c *gin.Context) {
 	var req ArchiveMetaReq
-	if err := c.ShouldBind(&req); err != nil {
+	if err := c.ShouldBindQuery(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	user := c.MustGet("user").(*model.User)
+	if req.Path == "" {
+		common.ErrorResp(c, errors.New("path is required"), 400)
+		return
+	}
+	user := c.MustGet(ctxkey.User).(*model.User)
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	if !common.CheckPathLimitWithRoles(user, reqPath) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-	perm := common.MergeRolePermissions(user, reqPath)
-	if !common.HasPermission(perm, common.PermReadArchives) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-	meta, err := op.GetNearestMeta(reqPath)
+	meta, err := archive.Meta(c, user, reqPath, req.Password)
 	if err != nil {
-		if !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-			common.ErrorResp(c, err, 500, true)
-			return
-		}
-	}
-	c.Set("meta", meta)
-	if !common.CanAccess(user, meta, reqPath, req.Password) {
-		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
+		archiveErrorResp(c, err)
 		return
 	}
-	archiveArgs := model.ArchiveArgs{
-		LinkArgs: model.LinkArgs{
-			Header:  c.Request.Header,
-			Type:    c.Query("type"),
-			HttpReq: c.Request,
-		},
-		Password: req.ArchivePass,
-	}
-	ret, err := fs.ArchiveMeta(c, reqPath, model.ArchiveMetaArgs{
-		ArchiveArgs: archiveArgs,
-		Refresh:     req.Refresh,
-	})
-	if err != nil {
-		if errors.Is(err, errs.WrongArchivePassword) {
-			common.ErrorResp(c, err, 202)
-		} else {
-			common.ErrorResp(c, err, 500)
-		}
-		return
-	}
-	s := ""
-	if isEncrypt(meta, reqPath) || setting.GetBool(conf.SignAll) {
-		s = sign.SignArchive(reqPath)
-	}
-	api := "/ae"
-	if ret.DriverProviding {
-		api = "/ad"
-	}
-	common.SuccessResp(c, ArchiveMetaResp{
-		Comment:     ret.GetComment(),
-		IsEncrypted: ret.IsEncrypted(),
-		Content:     toContentResp(ret.GetTree()),
-		Sort:        ret.Sort,
-		RawURL:      fmt.Sprintf("%s%s%s", common.GetApiUrl(c.Request), api, utils.EncodePath(reqPath, true)),
-		Sign:        s,
-	})
+	common.SuccessResp(c, meta)
 }
 
 type ArchiveListReq struct {
-	ArchiveMetaReq
-	model.PageReq
-	InnerPath string `json:"inner_path" form:"inner_path"`
+	Path     string `json:"path" form:"path"`
+	Inner    string `json:"inner" form:"inner"`
+	Password string `json:"password" form:"password"`
 }
 
-type ArchiveListResp struct {
-	Content []ObjResp `json:"content"`
-	Total   int64     `json:"total"`
-}
-
+// FsArchiveList lists the immediate children of Inner within the zip at
+// Path (innerPath="" is the archive root).
+// @Summary List a zip archive's inner directory
+// @Description Dispatched by file extension to a registered ArchiveTool (built-in zip, or an installed plugin). Virtual-directory view: returns direct children of `inner` only, not the whole flat entry list. op.Authorize(ActRead) on path is the sole access boundary.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Produce json
+// @Param path query string true "archive file path"
+// @Param inner query string false "inner directory path within the archive (root if empty)"
+// @Param password query string false "archive password (reserved -- unused for std zip)"
+// @Success 200 {object} common.Resp[[]archive.Entry]
+// @Failure 400 {object} common.Resp[any] "missing path"
+// @Failure 403 {object} common.Resp[any] "no read permission on path"
+// @Failure 404 {object} common.Resp[any] "not found, not a zip archive, or inner path not found"
+// @Failure 422 {object} common.Resp[any] "zip exceeds a safety cap"
+// @Router /v4/fs/archive/list [get]
 func FsArchiveList(c *gin.Context) {
 	var req ArchiveListReq
-	if err := c.ShouldBind(&req); err != nil {
+	if err := c.ShouldBindQuery(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	req.Validate()
-	user := c.MustGet("user").(*model.User)
+	if req.Path == "" {
+		common.ErrorResp(c, errors.New("path is required"), 400)
+		return
+	}
+	user := c.MustGet(ctxkey.User).(*model.User)
 	reqPath, err := user.JoinPath(req.Path)
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	if !common.CheckPathLimitWithRoles(user, reqPath) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-	perm := common.MergeRolePermissions(user, reqPath)
-	if !common.HasPermission(perm, common.PermReadArchives) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-	meta, err := op.GetNearestMeta(reqPath)
+	entries, err := archive.List(c, user, reqPath, req.Inner, req.Password)
 	if err != nil {
-		if !errors.Is(errors.Cause(err), errs.MetaNotFound) {
-			common.ErrorResp(c, err, 500, true)
-			return
-		}
-	}
-	c.Set("meta", meta)
-	if !common.CanAccess(user, meta, reqPath, req.Password) {
-		common.ErrorStrResp(c, "password is incorrect or you have no permission", 403)
+		archiveErrorResp(c, err)
 		return
 	}
-	objs, err := fs.ArchiveList(c, reqPath, model.ArchiveListArgs{
-		ArchiveInnerArgs: model.ArchiveInnerArgs{
-			ArchiveArgs: model.ArchiveArgs{
-				LinkArgs: model.LinkArgs{
-					Header:  c.Request.Header,
-					Type:    c.Query("type"),
-					HttpReq: c.Request,
-				},
-				Password: req.ArchivePass,
-			},
-			InnerPath: utils.FixAndCleanPath(req.InnerPath),
-		},
-		Refresh: req.Refresh,
-	})
-	if err != nil {
-		if errors.Is(err, errs.WrongArchivePassword) {
-			common.ErrorResp(c, err, 202)
-		} else {
-			common.ErrorResp(c, err, 500)
-		}
-		return
-	}
-	total, objs := pagination(objs, &req.PageReq)
-	ret, _ := utils.SliceConvert(objs, func(src model.Obj) (ObjResp, error) {
-		return toObjsRespWithoutSignAndThumb(src), nil
-	})
-	common.SuccessResp(c, ArchiveListResp{
-		Content: ret,
-		Total:   int64(total),
-	})
+	common.SuccessResp(c, entries)
 }
 
-type StringOrArray []string
+// FsArchiveExtract streams one inner file entry's bytes. Real HTTP statuses
+// (not the 200+JSON envelope), same reasoning as FsThumb: this is a
+// browser-navigable download/preview URL, not a JSON API call.
+// @Summary Extract one file from a zip archive
+// @Description Dispatched by file extension to a registered ArchiveTool (built-in zip, or an installed plugin). Streams the inner file's bytes directly (Content-Disposition: inline). A single entry's declared uncompressed size is capped; the entry itself is streamed, never buffered whole.
+// @Tags fs
+// @Security ApiKeyAuth
+// @Param path query string true "archive file path"
+// @Param inner query string true "inner file path within the archive"
+// @Param password query string false "archive password (reserved -- unused for std zip)"
+// @Success 200 {file} binary "the inner file's raw bytes"
+// @Failure 400 {object} common.Resp[any] "missing path/inner, or inner path is a directory"
+// @Failure 403 {object} common.Resp[any] "no read permission on path"
+// @Failure 404 {object} common.Resp[any] "not found, not a zip archive, or inner path not found"
+// @Failure 422 {object} common.Resp[any] "encrypted entry, or exceeds a safety cap"
+// @Router /v4/fs/archive/extract [get]
+func FsArchiveExtract(c *gin.Context) {
+	rawPath := c.Query("path")
+	if rawPath == "" {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	inner := c.Query("inner")
+	password := c.Query("password")
 
-func (s *StringOrArray) UnmarshalJSON(data []byte) error {
-	var value string
-	if err := json.Unmarshal(data, &value); err == nil {
-		*s = []string{value}
-		return nil
+	user := c.MustGet(ctxkey.User).(*model.User)
+	reqPath, err := user.JoinPath(rawPath)
+	if err != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
 	}
-	var sliceValue []string
-	if err := json.Unmarshal(data, &sliceValue); err != nil {
-		return err
+
+	rc, size, err := archive.Extract(c, user, reqPath, inner, password)
+	if err != nil {
+		c.AbortWithStatus(archiveErrStatus(err))
+		return
 	}
-	*s = sliceValue
-	return nil
+	defer rc.Close()
+
+	name := stdpath.Base(inner)
+	ct := mime.TypeByExtension(stdpath.Ext(name))
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	c.Header("Content-Disposition", `inline; filename="`+escapeContentDispositionFilename(name)+`"`)
+	c.DataFromReader(http.StatusOK, size, ct, rc, nil)
 }
 
-type ArchiveDecompressReq struct {
-	SrcDir        string        `json:"src_dir" form:"src_dir"`
-	DstDir        string        `json:"dst_dir" form:"dst_dir"`
-	Name          StringOrArray `json:"name" form:"name"`
-	ArchivePass   string        `json:"archive_pass" form:"archive_pass"`
-	InnerPath     string        `json:"inner_path" form:"inner_path"`
-	CacheFull     bool          `json:"cache_full" form:"cache_full"`
-	PutIntoNewDir bool          `json:"put_into_new_dir" form:"put_into_new_dir"`
+// escapeContentDispositionFilename prevents a filename containing a double
+// quote (or backslash) from breaking out of the Content-Disposition header's
+// quoted-string.
+func escapeContentDispositionFilename(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' || s[i] == '\\' {
+			out = append(out, '\\')
+		}
+		out = append(out, s[i])
+	}
+	return string(out)
 }
 
-func FsArchiveDecompress(c *gin.Context) {
-	var req ArchiveDecompressReq
-	if err := c.ShouldBind(&req); err != nil {
-		common.ErrorResp(c, err, 400)
-		return
-	}
-	user := c.MustGet("user").(*model.User)
-	srcDir, err := user.JoinPath(req.SrcDir)
-	if err != nil {
-		common.ErrorResp(c, err, 403)
-		return
-	}
-	srcPaths := make([]string, 0, len(req.Name))
-	for _, name := range req.Name {
-		srcPath, err := utils.JoinUnderBase(srcDir, name)
-		if err != nil {
-			common.ErrorResp(c, err, 400)
-			return
-		}
-		if !common.CheckPathLimitWithRoles(user, srcPath) {
-			common.ErrorResp(c, errs.PermissionDenied, 403)
-			return
-		}
-		srcPaths = append(srcPaths, srcPath)
-	}
-	dstDir, err := user.JoinPath(req.DstDir)
-	if err != nil {
-		common.ErrorResp(c, err, 403)
-		return
-	}
-	if !common.CheckPathLimitWithRoles(user, dstDir) {
-		common.ErrorResp(c, errs.PermissionDenied, 403)
-		return
-	}
-	tasks := make([]task.TaskExtensionInfo, 0, len(srcPaths))
-	for _, srcPath := range srcPaths {
-		perm := common.MergeRolePermissions(user, srcPath)
-		if !common.HasPermission(perm, common.PermDecompress) {
-			common.ErrorResp(c, errs.PermissionDenied, 403)
-			return
-		}
-		t, e := fs.ArchiveDecompress(c, srcPath, dstDir, model.ArchiveDecompressArgs{
-			ArchiveInnerArgs: model.ArchiveInnerArgs{
-				ArchiveArgs: model.ArchiveArgs{
-					LinkArgs: model.LinkArgs{
-						Header:  c.Request.Header,
-						Type:    c.Query("type"),
-						HttpReq: c.Request,
-					},
-					Password: req.ArchivePass,
-				},
-				InnerPath: utils.FixAndCleanPath(req.InnerPath),
-			},
-			CacheFull:     req.CacheFull,
-			PutIntoNewDir: req.PutIntoNewDir,
-		})
-		if e != nil {
-			if errors.Is(e, errs.WrongArchivePassword) {
-				common.ErrorResp(c, e, 202)
-			} else {
-				common.ErrorResp(c, e, 500)
-			}
-			return
-		}
-		if t != nil {
-			tasks = append(tasks, t)
-		}
-	}
-	common.SuccessResp(c, gin.H{
-		"task": getTaskInfos(tasks),
-	})
-}
-
-func ArchiveDown(c *gin.Context) {
-	archiveRawPath := c.MustGet("path").(string)
-	innerPath := utils.FixAndCleanPath(c.Query("inner"))
-	password := c.Query("pass")
-	filename := stdpath.Base(innerPath)
-	storage, err := fs.GetStorage(archiveRawPath, &fs.GetStoragesArgs{})
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	if common.ShouldProxy(storage, filename) {
-		ArchiveProxy(c)
-		return
-	} else {
-		link, _, err := fs.ArchiveDriverExtract(c, archiveRawPath, model.ArchiveInnerArgs{
-			ArchiveArgs: model.ArchiveArgs{
-				LinkArgs: model.LinkArgs{
-					IP:       c.ClientIP(),
-					Header:   c.Request.Header,
-					Type:     c.Query("type"),
-					HttpReq:  c.Request,
-					Redirect: true,
-				},
-				Password: password,
-			},
-			InnerPath: innerPath,
-		})
-		if err != nil {
-			common.ErrorResp(c, err, 500)
-			return
-		}
-		down(c, link)
+// archiveErrorResp maps an internal/archive error to the 200+JSON envelope's
+// logical code, for the JSON-returning Meta/List handlers.
+func archiveErrorResp(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, errs.PermissionDenied), errors.Is(err, errs.WrongPassword):
+		common.AuthzErrorResp(c, err, "password is incorrect or you have no permission")
+	case errors.Is(err, archive.ErrNotArchive),
+		errors.Is(err, archive.ErrInnerNotFound),
+		errs.IsObjectNotFound(err),
+		errs.IsNotFoundError(err):
+		common.ErrorResp(c, err, 404)
+	case errors.Is(err, archive.ErrArchiveEncrypted),
+		errors.Is(err, archive.ErrTooManyEntries),
+		errors.Is(err, archive.ErrArchiveTooLarge),
+		errors.Is(err, archive.ErrEntryTooLarge):
+		common.ErrorResp(c, err, 422)
+	default:
+		common.ErrorResp(c, err, 500, true)
 	}
 }
 
-func ArchiveProxy(c *gin.Context) {
-	archiveRawPath := c.MustGet("path").(string)
-	innerPath := utils.FixAndCleanPath(c.Query("inner"))
-	password := c.Query("pass")
-	filename := stdpath.Base(innerPath)
-	storage, err := fs.GetStorage(archiveRawPath, &fs.GetStoragesArgs{})
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
+// archiveErrStatus maps an internal/archive error to a REAL HTTP status, for
+// the byte-streaming Extract handler.
+func archiveErrStatus(err error) int {
+	switch {
+	case errors.Is(err, errs.PermissionDenied), errors.Is(err, errs.WrongPassword):
+		return http.StatusForbidden
+	case errors.Is(err, archive.ErrNotArchive),
+		errors.Is(err, archive.ErrInnerNotFound),
+		errs.IsObjectNotFound(err),
+		errs.IsNotFoundError(err):
+		return http.StatusNotFound
+	case errors.Is(err, archive.ErrIsDir):
+		return http.StatusBadRequest
+	case errors.Is(err, archive.ErrArchiveEncrypted),
+		errors.Is(err, archive.ErrTooManyEntries),
+		errors.Is(err, archive.ErrArchiveTooLarge),
+		errors.Is(err, archive.ErrEntryTooLarge):
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
 	}
-	if canProxy(storage, filename) {
-		// TODO: Support external download proxy URL
-		link, file, err := fs.ArchiveDriverExtract(c, archiveRawPath, model.ArchiveInnerArgs{
-			ArchiveArgs: model.ArchiveArgs{
-				LinkArgs: model.LinkArgs{
-					Header:  c.Request.Header,
-					Type:    c.Query("type"),
-					HttpReq: c.Request,
-				},
-				Password: password,
-			},
-			InnerPath: innerPath,
-		})
-		if err != nil {
-			common.ErrorResp(c, err, 500)
-			return
-		}
-		localProxy(c, link, file, storage.GetStorage().ProxyRange)
-	} else {
-		common.ErrorStrResp(c, "proxy not allowed", 403)
-		return
-	}
-}
-
-func ArchiveInternalExtract(c *gin.Context) {
-	archiveRawPath := c.MustGet("path").(string)
-	innerPath := utils.FixAndCleanPath(c.Query("inner"))
-	password := c.Query("pass")
-	rc, size, err := fs.ArchiveInternalExtract(c, archiveRawPath, model.ArchiveInnerArgs{
-		ArchiveArgs: model.ArchiveArgs{
-			LinkArgs: model.LinkArgs{
-				Header:  c.Request.Header,
-				Type:    c.Query("type"),
-				HttpReq: c.Request,
-			},
-			Password: password,
-		},
-		InnerPath: innerPath,
-	})
-	if err != nil {
-		common.ErrorResp(c, err, 500)
-		return
-	}
-	defer func() {
-		if err := rc.Close(); err != nil {
-			log.Errorf("failed to close file streamer, %v", err)
-		}
-	}()
-	headers := map[string]string{
-		"Referrer-Policy": "no-referrer",
-		"Cache-Control":   "max-age=0, no-cache, no-store, must-revalidate",
-	}
-	filename := stdpath.Base(innerPath)
-	headers["Content-Disposition"] = fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, filename, url.PathEscape(filename))
-	contentType := c.Request.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = utils.GetMimeType(filename)
-	}
-	c.DataFromReader(200, size, contentType, rc, headers)
-}
-
-func ArchiveExtensions(c *gin.Context) {
-	var ext []string
-	for key := range tool.Tools {
-		ext = append(ext, key)
-	}
-	common.SuccessResp(c, ext)
 }

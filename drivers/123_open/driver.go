@@ -3,15 +3,16 @@ package _123Open
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strconv"
+	"time"
+
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/go-resty/resty/v2"
-	"net/http"
-	"strconv"
-	"time"
 )
 
 type Open123 struct {
@@ -20,6 +21,11 @@ type Open123 struct {
 
 	UploadThread int
 	tm           *tokenManager
+
+	// apiBase overrides the API host. It defaults to ApiBaseURL and is only
+	// set (to an httptest server) by the driver's own tests; it is not an
+	// Addition field and is not exposed in the config form.
+	apiBase string
 }
 
 func (d *Open123) Config() driver.Config {
@@ -31,10 +37,13 @@ func (d *Open123) GetAddition() driver.Additional {
 }
 
 func (d *Open123) Init(ctx context.Context) error {
-	d.tm = newTokenManager(d.ClientID, d.ClientSecret)
+	if d.apiBase == "" {
+		d.apiBase = ApiBaseURL
+	}
+	d.tm = newTokenManager(d.apiBase, d.ClientID, d.ClientSecret)
 
 	if _, err := d.tm.getToken(); err != nil {
-		return fmt.Errorf("token 初始化失败: %w", err)
+		return fmt.Errorf("token init failed: %w", err)
 	}
 
 	return nil
@@ -251,6 +260,9 @@ func (d *Open123) Remove(ctx context.Context, obj model.Obj) error {
 
 func (d *Open123) Put(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress) error {
 	parentFileId, err := strconv.ParseInt(dstDir.GetID(), 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid parent ID: %w", err)
+	}
 	etag := file.GetHash().GetHash(utils.MD5)
 
 	if len(etag) < utils.MD5.Width {
@@ -271,6 +283,49 @@ func (d *Open123) Put(ctx context.Context, dstDir model.Obj, file model.FileStre
 	return d.Upload(ctx, file, parentFileId, createResp, up)
 }
 
+// TryRapidUpload implements the OPTIONAL driver.PutRapid interface (design
+// SP-H): it registers a file into dstDir by hash WITHOUT transferring any bytes
+// when 123's create/reuse API recognizes the content. This is exactly the fast
+// path Put already relies on — Put computes/uses the whole-file MD5 etag, calls
+// d.create(...), and returns early when createResp.Data.Reuse is true — factored
+// out so the copy executor can try it BEFORE downloading+streaming.
+//
+// It uses ONLY the MD5 the SOURCE already exposes (via hashes); it never reads
+// or spools bytes to compute one — that would defeat the point of a rapid
+// upload. 123's reuse check is keyed on the MD5 etag, so if no MD5 is provided
+// there is nothing usable and it returns errs.NotSupport (the caller streams).
+func (d *Open123) TryRapidUpload(ctx context.Context, dstDir model.Obj, name string, size int64, hashes utils.HashInfo) (model.Obj, bool, error) {
+	etag := hashes.GetHash(utils.MD5)
+	if len(etag) < utils.MD5.Width {
+		// No usable whole-file MD5 — the ONLY hash 123's reuse API accepts. We
+		// must NOT spool the file to compute one here (anti-pattern), so signal
+		// the caller to fall back to streaming.
+		return nil, false, errs.NotSupport
+	}
+	parentFileID, err := strconv.ParseInt(dstDir.GetID(), 10, 64)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid parent ID: %w", err)
+	}
+	createResp, err := d.create(parentFileID, name, etag, size, 2, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if !createResp.Data.Reuse {
+		// The provider does not already hold this content — no rapid hit; the
+		// caller must stream the bytes.
+		return nil, false, nil
+	}
+	return File{
+		FileId:       createResp.Data.FileID,
+		FileName:     name,
+		Type:         0,
+		ParentFileId: int(parentFileID),
+		Size:         size,
+		Etag:         etag,
+		Trashed:      0,
+	}, true, nil
+}
+
 func (d *Open123) GetArchiveMeta(ctx context.Context, obj model.Obj, args model.ArchiveArgs) (model.ArchiveMeta, error) {
 	return nil, errs.NotSupport
 }
@@ -287,8 +342,5 @@ func (d *Open123) ArchiveDecompress(ctx context.Context, srcObj, dstDir model.Ob
 	return nil, errs.NotSupport
 }
 
-//func (d *Open123) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
-//	return nil, errs.NotSupport
-//}
-
 var _ driver.Driver = (*Open123)(nil)
+var _ driver.PutRapid = (*Open123)(nil)

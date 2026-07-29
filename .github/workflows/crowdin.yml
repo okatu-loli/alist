@@ -1,0 +1,33 @@
+name: Crowdin sync
+
+# Pushes the hand-maintained en (source) + zh-CN (translation) i18n JSON to
+# Crowdin on every merge to main. Crowdin then hosts every other language;
+# the backend renders English at runtime for those.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "internal/i18n/locales/**"
+      - "crowdin.yml"
+      - ".github/workflows/crowdin.yml"
+
+jobs:
+  crowdin-sync:
+    runs-on: ubuntu-latest
+    # Skip gracefully (rather than fail the run) until the repo secrets are
+    # configured — set CROWDIN_PROJECT_ID / CROWDIN_PERSONAL_TOKEN as repo
+    # secrets before this job can push translations.
+    if: ${{ secrets.CROWDIN_PROJECT_ID != '' && secrets.CROWDIN_PERSONAL_TOKEN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload sources + translations to Crowdin
+        uses: crowdin/github-action@v2
+        with:
+          upload_sources: true
+          upload_translations: true
+          config: crowdin.yml
+        env:
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}

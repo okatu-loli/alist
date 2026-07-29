@@ -1,16 +1,10 @@
 package db
 
 import (
-	"encoding/base64"
-	"fmt"
 	"github.com/alist-org/alist/v3/internal/model"
-	"github.com/alist-org/alist/v3/pkg/utils"
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pkg/errors"
 	"gorm.io/gorm"
-	"path"
 	"slices"
-	"strings"
 )
 
 func GetUserByRole(role int) (*model.User, error) {
@@ -99,82 +93,24 @@ func UpdateAuthn(userID uint, authn string) error {
 	return db.Model(&model.User{ID: userID}).Update("authn", authn).Error
 }
 
-func RegisterAuthn(u *model.User, credential *webauthn.Credential) error {
-	if u == nil {
-		return errors.New("user is nil")
-	}
-	exists := u.WebAuthnCredentials()
-	if credential != nil {
-		exists = append(exists, *credential)
-	}
-	res, err := utils.Json.Marshal(exists)
-	if err != nil {
-		return err
-	}
-	return UpdateAuthn(u.ID, string(res))
-}
-
-func RemoveAuthn(u *model.User, id string) error {
-	exists := u.WebAuthnCredentials()
-	for i := 0; i < len(exists); i++ {
-		idEncoded := base64.StdEncoding.EncodeToString(exists[i].ID)
-		if idEncoded == id {
-			exists[len(exists)-1], exists[i] = exists[i], exists[len(exists)-1]
-			exists = exists[:len(exists)-1]
-			break
-		}
-	}
-
-	res, err := utils.Json.Marshal(exists)
-	if err != nil {
-		return err
-	}
-	return UpdateAuthn(u.ID, string(res))
-}
-
-func UpdateUserBasePathPrefix(oldPath, newPath string, usersOpt ...[]model.User) ([]string, error) {
+// CountEnabledUsersWithRoleExcluding counts users that are enabled (not
+// disabled), hold roleID in their role binding, and are not excludeUserID.
+// The role column is a JSON array with no portable containment operator, so the
+// filter is applied in Go (mirroring GetUsersByRole) to stay correct across the
+// MySQL/Postgres/SQLite backends rather than depending on JSON_CONTAINS.
+func CountEnabledUsersWithRoleExcluding(roleID int, excludeUserID uint) (int64, error) {
 	var users []model.User
-	var modifiedUsernames []string
-
-	oldPathClean := path.Clean(oldPath)
-
-	if len(usersOpt) > 0 {
-		users = usersOpt[0]
-	} else {
-		if err := db.Find(&users).Error; err != nil {
-			return nil, errors.WithMessage(err, "failed to load users")
-		}
+	if err := db.Find(&users).Error; err != nil {
+		return 0, errors.WithStack(err)
 	}
-
-	for _, user := range users {
-		basePath := path.Clean(user.BasePath)
-		updated := false
-
-		if basePath == oldPathClean {
-			user.BasePath = path.Clean(newPath)
-			updated = true
-		} else if strings.HasPrefix(basePath, oldPathClean+"/") {
-			user.BasePath = path.Clean(newPath + basePath[len(oldPathClean):])
-			updated = true
-		}
-
-		if updated {
-			if err := UpdateUser(&user); err != nil {
-				return nil, errors.WithMessagef(err, "failed to update user ID %d", user.ID)
-			}
-			modifiedUsernames = append(modifiedUsernames, user.Username)
-		}
-	}
-
-	return modifiedUsernames, nil
-}
-
-func CountUsersByRoleAndEnabledExclude(roleID uint, excludeUserID uint) (int64, error) {
 	var count int64
-	jsonValue := fmt.Sprintf("[%d]", roleID)
-	err := db.Model(&model.User{}).
-		Where("disabled = ? AND id != ?", false, excludeUserID).
-		Where("JSON_CONTAINS(role, ?)", jsonValue).
-		Count(&count).Error
-	return count, err
+	for i := range users {
+		if users[i].ID == excludeUserID || users[i].Disabled {
+			continue
+		}
+		if users[i].Role.Contains(roleID) {
+			count++
+		}
+	}
+	return count, nil
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/alist-org/alist/v3/cmd/flags"
 	"github.com/alist-org/alist/v3/internal/conf"
+	"github.com/alist-org/alist/v3/internal/i18n"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/natefinch/lumberjack"
 	"github.com/sirupsen/logrus"
@@ -42,6 +43,8 @@ func Log() {
 	setLog(logrus.StandardLogger())
 	setLog(utils.Log)
 	logConfig := conf.Conf.Log
+	// Select the locale for keyed OPS logs (i18n.Log); default "en" is a no-op.
+	i18n.SetLogLang(logConfig.Lang)
 	if logConfig.Enable {
 		var w io.Writer = &lumberjack.Logger{
 			Filename:   logConfig.Name,

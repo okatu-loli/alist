@@ -1,0 +1,13 @@
+module {{.Module}}
+
+go 1.24.0
+
+require github.com/AlistGo/alist-ext {{.ExtRequire}}
+{{- if .ExtPath}}
+
+// Added by `alist plugin new --ext-path {{.ExtPath}}`: points go build at a
+// local alist-ext checkout instead of the published module — useful when
+// developing against unreleased SDK changes. Drop this to build against the
+// tagged release.
+replace github.com/AlistGo/alist-ext => {{.ExtPath}}
+{{- end}}

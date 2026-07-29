@@ -1,0 +1,284 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// DriverService mirrors the ext.StorageDriver interface (9.2). The plugin
+// implements it; the host forwards ext calls over gRPC. A single plugin process
+// serves many storage instances, routed by ObjRef.storage_id (9.0 §3).
+service DriverService {
+  // GetManifest is the handshake: the manifest (with declared capabilities) and
+  // the static driver config. The host builds its capability gate from this.
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // Instance lifecycle (9.0 §3): one mounted storage = one instance.
+  rpc NewInstance(NewInstanceRequest) returns (ErrorReply);
+  rpc DropInstance(DropInstanceRequest) returns (ErrorReply);
+
+  // Required ops.
+  rpc List(ListRequest) returns (ListReply);
+  rpc Link(LinkRequest) returns (LinkReply);
+
+  // Optional-capability ops. The plugin returns NOT_IMPLEMENT when the backing
+  // driver lacks the capability; the host also gates on declared capabilities.
+  rpc Get(GetRequest) returns (ObjReply);
+  rpc MakeDir(MakeDirRequest) returns (ObjReply);
+  rpc Rename(RenameRequest) returns (ObjReply);
+  rpc Move(MoveRequest) returns (ObjReply);
+  rpc Copy(CopyRequest) returns (ObjReply);
+  rpc Remove(RemoveRequest) returns (ErrorReply);
+  rpc Other(OtherRequest) returns (OtherReply);
+
+  // TryRapidUpload tries a hash-based instant upload (SP-H). Miss is a
+  // NORMAL outcome (hit=false, no error); "not supported" travels as
+  // ErrorProto code NOT_SUPPORT / NOT_IMPLEMENT.
+  rpc TryRapidUpload(TryRapidUploadRequest) returns (TryRapidUploadReply);
+
+  // OpenRange server-streams the bytes of a ByteSource==stream Link (9.0 §1).
+  rpc OpenRange(OpenRangeRequest) returns (stream Chunk);
+
+  // Put is the pull-model upload (9.0 §2): the host serves ReadAt over this bidi
+  // stream while the plugin drives the upload. The host sends Init then ReadReply
+  // messages; the plugin sends ReadRequest / Progress / Done messages.
+  rpc Put(stream PutClient) returns (stream PutServer);
+
+  // InitHost is the host->plugin handshake for the reverse bridge (F0): the
+  // host tells the plugin the broker id its HostService is being served on so
+  // the plugin can dial back and deliver a working ext.Host to impl.Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+message Empty {}
+
+// ErrorProto carries the cross-boundary error code (9.0 §5). An empty code means
+// success; the host maps a non-empty code back to the matching ext sentinel.
+message ErrorProto {
+  string code = 1;
+  string message = 2;
+}
+
+message ErrorReply {
+  ErrorProto error = 1;
+}
+
+// ObjRef identifies a resource by storage plus an opaque anchor (9.0 §7).
+message ObjRef {
+  string storage_id = 1;
+  string anchor = 2;
+}
+
+// Obj is the flat serializable filesystem object DTO (9.0 §7).
+message Obj {
+  string name = 1;
+  int64 size = 2;
+  int64 modified = 3; // unix milliseconds
+  int64 created = 4;  // unix milliseconds
+  bool is_dir = 5;
+  string id = 6;
+  string path = 7;
+  map<string, string> hashes = 8;
+  string thumb = 9;
+  string url = 10;
+}
+
+message ObjReply {
+  Obj obj = 1;
+  ErrorProto error = 2;
+}
+
+message ManifestReply {
+  // manifest_json is the ext.Manifest marshaled as JSON (it is already a JSON
+  // contract; re-encoding it in proto would duplicate the frozen shape).
+  bytes manifest_json = 1;
+  // driver_config_json is the ext.DriverConfig marshaled as JSON.
+  bytes driver_config_json = 2;
+}
+
+message NewInstanceRequest {
+  string storage_id = 1;
+  bytes config = 2; // Addition JSON
+}
+
+message DropInstanceRequest {
+  string storage_id = 1;
+}
+
+// InitHostRequest carries the go-plugin GRPCBroker id the host is serving its
+// HostService on, so the plugin can broker.Dial it and build a host client.
+message InitHostRequest {
+  uint32 broker_id = 1;
+}
+
+// Header is a repeatable HTTP header field (http.Header is a multimap).
+message HeaderValue {
+  repeated string values = 1;
+}
+
+message ListArgs {
+  string req_path = 1;
+  bool refresh = 2;
+}
+
+message ListRequest {
+  ObjRef dir = 1;
+  ListArgs args = 2;
+}
+
+message ListReply {
+  repeated Obj objs = 1;
+  ErrorProto error = 2;
+}
+
+message LinkArgs {
+  string ip = 1;
+  map<string, HeaderValue> header = 2;
+  string type = 3;
+  bool redirect = 4;
+}
+
+message LinkRequest {
+  ObjRef file = 1;
+  LinkArgs args = 2;
+}
+
+// Link mirrors ext.Link (9.0 §1). byte_source is "url" or "stream".
+message Link {
+  string byte_source = 1;
+  string url = 2;
+  map<string, HeaderValue> header = 3;
+  string stream_id = 4;
+  bool range_support = 5;
+  int64 expiration = 6;
+  bool ip_cache_key = 7;
+  int32 concurrency = 8;
+  int32 part_size = 9;
+}
+
+message LinkReply {
+  Link link = 1;
+  ErrorProto error = 2;
+}
+
+message GetRequest {
+  string storage_id = 1;
+  string path = 2;
+}
+
+message MakeDirRequest {
+  ObjRef parent = 1;
+  string name = 2;
+}
+
+message RenameRequest {
+  ObjRef src = 1;
+  string new_name = 2;
+}
+
+message MoveRequest {
+  ObjRef src = 1;
+  ObjRef dst_dir = 2;
+}
+
+message CopyRequest {
+  ObjRef src = 1;
+  ObjRef dst_dir = 2;
+}
+
+message TryRapidUploadRequest {
+  ObjRef dst_dir = 1;
+  string name = 2;
+  int64 size = 3;
+  map<string, string> hashes = 4; // keys: "md5"/"sha1"/"sha256"
+}
+
+// TryRapidUploadReply: hit=false + error=nil 是合法「未命中」状态,
+// 不能复用 ObjReply。
+message TryRapidUploadReply {
+  Obj obj = 1;
+  bool hit = 2;
+  ErrorProto error = 3;
+}
+
+message RemoveRequest {
+  ObjRef obj = 1;
+}
+
+message OtherRequest {
+  ObjRef obj = 1;
+  string method = 2;
+  bytes data = 3; // json.RawMessage
+}
+
+message OtherReply {
+  bytes data = 1; // json.RawMessage
+  ErrorProto error = 2;
+}
+
+// Range is a byte range; length < 0 means "to the end" (9.0 §1).
+message Range {
+  int64 start = 1;
+  int64 length = 2;
+}
+
+message OpenRangeRequest {
+  ObjRef ref = 1;
+  string stream_id = 2;
+  Range range = 3;
+}
+
+// Chunk is one slice of OpenRange's byte stream. error set (non-empty code)
+// terminates the stream.
+message Chunk {
+  bytes data = 1;
+  ErrorProto error = 2;
+}
+
+// UploadInfo mirrors ext.UploadInfo (9.0 §2).
+message UploadInfo {
+  string name = 1;
+  int64 size = 2;
+  string mimetype = 3;
+  map<string, string> hashes = 4;
+  Obj exist = 5;
+}
+
+// PutClient: host -> plugin messages on the Put bidi stream.
+message PutClient {
+  oneof msg {
+    PutInit init = 1;
+    ReadReply read_reply = 2;
+  }
+}
+
+message PutInit {
+  ObjRef dst_dir = 1;
+  UploadInfo info = 2;
+}
+
+// ReadReply answers a ReadRequest with bytes read from the host-held upload
+// source. eof mirrors io.ReaderAt semantics; error terminates the upload.
+message ReadReply {
+  bytes data = 1;
+  bool eof = 2;
+  ErrorProto error = 3;
+}
+
+// PutServer: plugin -> host messages on the Put bidi stream.
+message PutServer {
+  oneof msg {
+    ReadRequest read_request = 1;
+    Progress progress = 2;
+    ObjReply done = 3;
+  }
+}
+
+// ReadRequest asks the host to ReadAt(offset, length) on the upload source.
+message ReadRequest {
+  int64 offset = 1;
+  int64 length = 2;
+}
+
+message Progress {
+  double fraction = 1;
+}

@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package alist.ext.v1;
+
+import "driver.proto";
+
+option go_package = "github.com/AlistGo/alist-ext/grpcproto";
+
+// OfflineDownloadToolService mirrors ext.OfflineDownloadTool (子项目 B / Phase
+// E ring 1): a Kind=OfflineDownloadTool plugin is an external download daemon
+// (aria2/qBittorrent/Transmission-alike) the offline_download base hands a URL
+// to and then polls by gid. Mirrors NotificationService one Kind over,
+// including the reverse-host InitHost bridge (F0/SP6): Config/AddURL/Remove/
+// Status are the 3 business methods + Config from ext.OfflineDownloadTool
+// (ext/offline_download_tool.go:22-41), GetManifest is the handshake, InitHost
+// is the reverse bridge.
+service OfflineDownloadToolService {
+  // GetManifest is the handshake: the manifest the host validates the plugin
+  // against before dispatching to it.
+  rpc GetManifest(Empty) returns (ManifestReply);
+
+  // Config reports the tool's identity (ext.OfflineDownloadTool.Config): the
+  // Name the offline_download_tool setting / a per-task Toolname selects on.
+  rpc Config(Empty) returns (ToolConfigReply);
+
+  // AddURL hands the daemon a URL to fetch (ext.OfflineDownloadTool.AddURL).
+  rpc AddURL(AddArgsProto) returns (AddURLReply);
+
+  // Remove cancels/removes the download identified by gid from the daemon
+  // (ext.OfflineDownloadTool.Remove).
+  rpc Remove(ToolRemoveRequest) returns (ErrorReply);
+
+  // Status reports the current progress/completion of the download gid
+  // (ext.OfflineDownloadTool.Status).
+  rpc Status(ToolStatusRequest) returns (ToolStatusReply);
+
+  // Reverse host bridge (F0/SP6): host serves a HostService on the broker id
+  // it passes here; the plugin dials it and delivers the host to Init.
+  rpc InitHost(InitHostRequest) returns (ErrorReply);
+}
+
+// ToolConfigReply mirrors ext.OfflineDownloadToolConfig field-for-field.
+message ToolConfigReply {
+  string name = 1;
+}
+
+// AddArgsProto mirrors ext.AddArgs field-for-field.
+message AddArgsProto {
+  string url = 1;
+  string temp_dir = 2;
+  string uid = 3;
+}
+
+message AddURLReply {
+  string gid = 1;
+  ErrorProto error = 2;
+}
+
+message ToolRemoveRequest {
+  string gid = 1;
+}
+
+message ToolStatusRequest {
+  string gid = 1;
+}
+
+// ToolStatusProto mirrors ext.ToolStatus field-for-field. err is already a
+// plain string on the Go side (ext.ToolStatus.Err — see its doc comment: an
+// error value cannot itself cross this boundary), so it carries over as-is,
+// unlike every other cross-boundary failure here which rides the sibling
+// ErrorProto/ErrorReply instead.
+message ToolStatusProto {
+  int64 total_bytes = 1;
+  double progress = 2;
+  string new_gid = 3;
+  bool completed = 4;
+  string status = 5;
+  string err = 6;
+}
+
+message ToolStatusReply {
+  ToolStatusProto status = 1;
+  ErrorProto error = 2;
+}
