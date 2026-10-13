@@ -1,0 +1,53 @@
+name: Backfill v3.65.0 missing assets
+
+on:
+  push:
+    branches: [codex/backfill-v3.65.0]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [freebsd, linux_musl, linux_musl_arm]
+    steps:
+      - name: Checkout recovery scripts
+        uses: actions/checkout@v4
+        with:
+          path: recovery
+      - name: Checkout exact release source
+        uses: actions/checkout@v4
+        with:
+          repository: AlistGo/alist
+          ref: ea628f9a4fb2dcd1f400a4a3f91ccb59b3c1da69
+          fetch-depth: 0
+          path: source
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Overlay repaired build scripts
+        run: |
+          cp recovery/build.sh source/build.sh
+          cp recovery/.github/scripts/build-freebsd.sh source/.github/scripts/build-freebsd.sh
+      - name: Build missing release assets
+        working-directory: source
+        env:
+          GROUP: ${{ matrix.group }}
+        run: bash build.sh release "$GROUP"
+      - name: Validate packages and embedded metadata
+        working-directory: source
+        env:
+          GROUP: ${{ matrix.group }}
+        run: python3 ../recovery/.github/scripts/validate-backfill.py "$GROUP"
+      - name: Upload recovery artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: v3.65.0-${{ matrix.group }}
+          path: source/build/compress/*
+          if-no-files-found: error
+          retention-days: 7
