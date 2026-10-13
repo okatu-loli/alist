@@ -30,6 +30,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.21'
+          cache-dependency-path: source/go.sum
       - name: Overlay repaired build scripts
         run: |
           cp recovery/build.sh source/build.sh
@@ -45,6 +46,7 @@ jobs:
           GROUP: ${{ matrix.group }}
         run: python3 ../recovery/.github/scripts/validate-backfill.py "$GROUP"
       - name: Upload recovery artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v3.65.0-${{ matrix.group }}
